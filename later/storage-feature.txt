@@ -1,0 +1,16 @@
+Regarding your question about Ceph + OpenStack storage:
+Here's what the current scripts configure:
+Ceph FeatureOpenStack ServiceScriptStatusBlock Storage (RBD)Cinder (Volumes)28-29✅ IncludedBlock Storage (RBD)Glance (Images)17-18✅ IncludedBlock Storage (RBD)Nova (Ephemeral disks)30✅ IncludedObject Storage (RGW)Swift-compatible API-❌ Not includedFile System (CephFS)Manila (Shared FS)-❌ Not included
+What you GET with current scripts:
+
+VM images stored in Ceph (Glance → images pool)
+VM volumes stored in Ceph (Cinder → volumes pool)
+VM ephemeral disks in Ceph (Nova → vms pool)
+Volume backups in Ceph (Cinder → backups pool)
+
+What you DON'T get (can add later):
+
+Ceph RGW (Object/Bucket storage) - S3/Swift compatible API
+CephFS + Manila - Shared filesystem for VMs
+
+If you want Object Storage (S3-like buckets) or Shared Filesystems later, let me know and I can create additional scripts for those. For now, the current setup covers the most common OpenStack + Ceph use cases.
