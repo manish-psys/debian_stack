@@ -1,7 +1,7 @@
 #!/bin/bash
 ###############################################################################
 # 08-ceph-mon-init.sh
-# Initialize Ceph monitor and manager
+# Initialize Ceph monitor and manager (Fixed for Ceph Nautilus)
 ###############################################################################
 set -e
 
@@ -26,7 +26,7 @@ sudo ceph-authtool --create-keyring /etc/ceph/ceph.mon.keyring \
 
 echo "[2/5] Creating admin keyring..."
 sudo ceph-authtool --create-keyring /etc/ceph/ceph.client.admin.keyring \
-    --gen-key -n client.admin --set-uid=0 \
+    --gen-key -n client.admin \
     --cap mon 'allow *' --cap osd 'allow *' \
     --cap mgr 'allow *' --cap mds 'allow *'
 
@@ -39,9 +39,11 @@ sudo monmaptool --create --add ${HOSTNAME} ${IP_ADDRESS}:6789 \
     --fsid "${FSID}" /tmp/monmap
 
 echo "[5/5] Initializing monitor..."
-sudo -u ceph ceph-mon --mkfs -i ${HOSTNAME} \
+sudo mkdir -p /var/lib/ceph/mon/ceph-${HOSTNAME}
+sudo ceph-mon --mkfs -i ${HOSTNAME} \
     --monmap /tmp/monmap \
     --keyring /etc/ceph/ceph.mon.keyring
+sudo chown -R ceph:ceph /var/lib/ceph/mon/ceph-${HOSTNAME}
 
 echo ""
 echo "=== Ceph monitor initialized ==="
