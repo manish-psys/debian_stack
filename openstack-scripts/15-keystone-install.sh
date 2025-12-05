@@ -6,8 +6,8 @@
 set -e
 
 # Configuration - EDIT THESE
-KEYSTONE_DB_PASS="keystonedbpass"  # Must match 14-keystone-db.sh
-ADMIN_PASS="adminpass"             # Admin user password - Change this!
+KEYSTONE_DB_PASS="pspl@#321P"  # Must match 14-keystone-db.sh
+ADMIN_PASS="pspl@#321P"             # Admin user password - Change this!
 IP_ADDRESS="192.168.2.9"
 
 echo "=== Step 15: Keystone Installation ==="
