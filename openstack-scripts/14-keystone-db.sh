@@ -6,7 +6,7 @@
 set -e
 
 # Configuration - EDIT THESE
-KEYSTONE_DB_PASS="keystonedbpass"  # Change this!
+KEYSTONE_DB_PASS="pspl@#$6321P"  # Change this!
 
 echo "=== Step 14: Keystone Database Setup ==="
 
