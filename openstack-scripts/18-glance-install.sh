@@ -5,25 +5,120 @@
 ###############################################################################
 set -e
 
-# Configuration - EDIT THESE
-GLANCE_DB_PASS="glancedbpass"    # Must match 17-glance-db.sh
-GLANCE_PASS="glancepass"         # Must match 17-glance-db.sh
+# Configuration - EDIT THESE (must match 17-glance-db.sh)
+GLANCE_DB_PASS="glancepass123"
+GLANCE_PASS="glancepass123"
 IP_ADDRESS="192.168.2.9"
+CEPH_POOL="images"
 
 echo "=== Step 18: Glance Installation ==="
 
-echo "[1/5] Installing Glance..."
-sudo apt -t bullseye-wallaby-backports install -y glance
+# ============================================================================
+# PART 0: Prerequisites check
+# ============================================================================
+echo "[0/8] Checking prerequisites..."
 
-echo "[2/5] Backing up original config..."
-sudo cp /etc/glance/glance-api.conf /etc/glance/glance-api.conf.orig
+if ! command -v crudini &> /dev/null; then
+    sudo apt install -y crudini
+fi
+echo "  ✓ crudini available"
 
-echo "[3/5] Configuring Glance..."
-# Database
+# Verify Ceph is running
+if ! sudo ceph health &>/dev/null; then
+    echo "  ✗ ERROR: Ceph cluster not accessible!"
+    exit 1
+fi
+echo "  ✓ Ceph cluster accessible"
+
+# ============================================================================
+# PART 1: Create Ceph pool for Glance images
+# ============================================================================
+echo "[1/8] Creating Ceph pool for images..."
+
+if sudo ceph osd pool ls | grep -q "^${CEPH_POOL}$"; then
+    echo "  ✓ Pool '${CEPH_POOL}' already exists"
+else
+    sudo ceph osd pool create ${CEPH_POOL} 32
+    sudo ceph osd pool set ${CEPH_POOL} size 2
+    sudo ceph osd pool application enable ${CEPH_POOL} rbd
+    echo "  ✓ Pool '${CEPH_POOL}' created"
+fi
+
+# Initialize RBD on the pool
+sudo rbd pool init ${CEPH_POOL} 2>/dev/null || true
+
+# ============================================================================
+# PART 2: Create Ceph user for Glance
+# ============================================================================
+echo "[2/8] Creating Ceph user for Glance..."
+
+if sudo ceph auth get client.glance &>/dev/null; then
+    echo "  ✓ Ceph user 'glance' already exists"
+else
+    sudo ceph auth get-or-create client.glance \
+        mon 'allow r' \
+        osd "allow class-read object_prefix rbd_children, allow rwx pool=${CEPH_POOL}" \
+        -o /etc/ceph/ceph.client.glance.keyring
+    echo "  ✓ Ceph user 'glance' created"
+fi
+
+# Ensure keyring file exists and has correct permissions
+if [ ! -f /etc/ceph/ceph.client.glance.keyring ]; then
+    sudo ceph auth get client.glance -o /etc/ceph/ceph.client.glance.keyring
+fi
+sudo chown glance:glance /etc/ceph/ceph.client.glance.keyring 2>/dev/null || true
+sudo chmod 640 /etc/ceph/ceph.client.glance.keyring
+
+# ============================================================================
+# PART 3: Pre-seed dbconfig-common
+# ============================================================================
+echo "[3/8] Configuring dbconfig-common..."
+
+sudo mkdir -p /etc/dbconfig-common
+cat <<EOF | sudo tee /etc/dbconfig-common/glance-api.conf > /dev/null
+dbc_install='false'
+dbc_upgrade='false'
+dbc_remove=''
+dbc_dbtype='mysql'
+dbc_dbuser='glance'
+dbc_dbpass='${GLANCE_DB_PASS}'
+dbc_dbserver='localhost'
+dbc_dbname='glance'
+EOF
+
+echo "glance-api glance/dbconfig-install boolean false" | sudo debconf-set-selections
+echo "glance-common glance/dbconfig-install boolean false" | sudo debconf-set-selections
+
+echo "  ✓ dbconfig-common configured"
+
+# ============================================================================
+# PART 4: Install Glance packages
+# ============================================================================
+echo "[4/8] Installing Glance packages..."
+
+export DEBIAN_FRONTEND=noninteractive
+sudo -E apt-get -t bullseye-wallaby-backports install -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    glance python3-rbd
+
+echo "  ✓ Glance packages installed"
+
+# ============================================================================
+# PART 5: Backup and configure Glance
+# ============================================================================
+echo "[5/8] Configuring Glance..."
+
+# Backup original config
+if [ -f /etc/glance/glance-api.conf ] && [ ! -f /etc/glance/glance-api.conf.orig ]; then
+    sudo cp /etc/glance/glance-api.conf /etc/glance/glance-api.conf.orig
+fi
+
+# Database connection
 sudo crudini --set /etc/glance/glance-api.conf database connection \
     "mysql+pymysql://glance:${GLANCE_DB_PASS}@localhost/glance"
 
-# Keystone auth
+# Keystone authentication
 sudo crudini --set /etc/glance/glance-api.conf keystone_authtoken www_authenticate_uri "http://${IP_ADDRESS}:5000"
 sudo crudini --set /etc/glance/glance-api.conf keystone_authtoken auth_url "http://${IP_ADDRESS}:5000"
 sudo crudini --set /etc/glance/glance-api.conf keystone_authtoken memcached_servers "localhost:11211"
@@ -37,28 +132,109 @@ sudo crudini --set /etc/glance/glance-api.conf keystone_authtoken password "${GL
 # Paste deploy
 sudo crudini --set /etc/glance/glance-api.conf paste_deploy flavor "keystone"
 
-# Ceph backend
-sudo crudini --set /etc/glance/glance-api.conf glance_store stores "rbd"
+# Ceph/RBD backend configuration
+sudo crudini --set /etc/glance/glance-api.conf glance_store stores "rbd,file,http"
 sudo crudini --set /etc/glance/glance-api.conf glance_store default_store "rbd"
-sudo crudini --set /etc/glance/glance-api.conf glance_store rbd_store_pool "images"
-sudo crudini --set /etc/glance/glance-api.conf glance_store rbd_store_user "cinder"
+sudo crudini --set /etc/glance/glance-api.conf glance_store rbd_store_pool "${CEPH_POOL}"
+sudo crudini --set /etc/glance/glance-api.conf glance_store rbd_store_user "glance"
 sudo crudini --set /etc/glance/glance-api.conf glance_store rbd_store_ceph_conf "/etc/ceph/ceph.conf"
 sudo crudini --set /etc/glance/glance-api.conf glance_store rbd_store_chunk_size "8"
 
-echo "[4/5] Setting up Ceph keyring for Glance..."
-sudo cp /etc/ceph/ceph.client.cinder.keyring /etc/ceph/ceph.client.cinder.keyring.glance
-sudo chown glance:glance /etc/ceph/ceph.client.cinder.keyring.glance
+# Enable image format options
+sudo crudini --set /etc/glance/glance-api.conf DEFAULT show_image_direct_url "True"
 
-echo "[5/5] Syncing database and restarting..."
-sudo -u glance glance-manage db_sync
+echo "  ✓ Glance configured"
+
+# ============================================================================
+# PART 6: Fix keyring permissions (after package creates glance user)
+# ============================================================================
+echo "[6/8] Fixing Ceph keyring permissions..."
+
+sudo chown glance:glance /etc/ceph/ceph.client.glance.keyring
+sudo chmod 640 /etc/ceph/ceph.client.glance.keyring
+
+echo "  ✓ Keyring permissions set"
+
+# ============================================================================
+# PART 7: Sync database
+# ============================================================================
+echo "[7/8] Syncing Glance database..."
+
+if sudo -u glance glance-manage db_sync 2>&1; then
+    echo "  ✓ Database synced"
+else
+    echo "  ✗ ERROR: Database sync failed!"
+    exit 1
+fi
+
+# ============================================================================
+# PART 8: Start services
+# ============================================================================
+echo "[8/8] Starting Glance services..."
+
 sudo systemctl restart glance-api
 sudo systemctl enable glance-api
 
+# Wait for service to start
+sleep 3
+
+echo "  ✓ Glance services started"
+
+# ============================================================================
+# Verification
+# ============================================================================
 echo ""
-echo "Testing Glance..."
+echo "Verifying Glance installation..."
+
+ERRORS=0
+
+# Check service is running
+if systemctl is-active --quiet glance-api; then
+    echo "  ✓ glance-api service is running"
+else
+    echo "  ✗ glance-api service is NOT running!"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check port is listening
+if sudo ss -tlnp | grep -q ':9292'; then
+    echo "  ✓ Glance is listening on port 9292"
+else
+    echo "  ✗ Glance is NOT listening on port 9292!"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check Ceph pool
+if sudo rados -p ${CEPH_POOL} ls &>/dev/null; then
+    echo "  ✓ Ceph pool '${CEPH_POOL}' accessible"
+else
+    echo "  ✗ Ceph pool '${CEPH_POOL}' not accessible!"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Test API via OpenStack client
 source ~/admin-openrc
-openstack image list
+if openstack image list &>/dev/null; then
+    echo "  ✓ Glance API responding"
+    IMAGE_COUNT=$(openstack image list -f value | wc -l)
+    echo "  ✓ Current images: ${IMAGE_COUNT}"
+else
+    echo "  ✗ Glance API not responding!"
+    ERRORS=$((ERRORS + 1))
+fi
 
 echo ""
-echo "=== Glance installed and configured ==="
+if [ $ERRORS -eq 0 ]; then
+    echo "=== Glance installed successfully ==="
+else
+    echo "=== Glance installation completed with $ERRORS error(s) ==="
+    echo "Check logs: sudo journalctl -u glance-api -n 50"
+fi
+
+echo ""
+echo "To upload a test image:"
+echo "  wget http://download.cirros-cloud.net/0.5.2/cirros-0.5.2-x86_64-disk.img"
+echo "  openstack image create --disk-format qcow2 --container-format bare \\"
+echo "    --public --file cirros-0.5.2-x86_64-disk.img cirros"
+echo ""
 echo "Next: Run 19-placement-db.sh"
