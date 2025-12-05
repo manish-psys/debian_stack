@@ -6,7 +6,7 @@
 set -e
 
 # Configuration - EDIT THESE
-ADMIN_PASS="adminpass"    # Must match 15-keystone-install.sh
+ADMIN_PASS="keystonepass123"    # Must match 15-keystone-install.sh
 IP_ADDRESS="192.168.2.9"
 
 echo "=== Step 16: Create Admin Credentials File ==="
@@ -24,14 +24,30 @@ export OS_IMAGE_API_VERSION=2
 EOF
 
 chmod 600 ~/admin-openrc
+echo "  ✓ admin-openrc created"
 
-echo "[2/2] Testing Keystone..."
+echo "[2/2] Testing Keystone authentication..."
 source ~/admin-openrc
-openstack token issue
+
+if openstack token issue; then
+    echo ""
+    echo "  ✓ Authentication successful"
+else
+    echo ""
+    echo "  ✗ Authentication failed!"
+    echo "  Check password matches between scripts 15 and 16"
+    exit 1
+fi
 
 echo ""
 echo "=== Admin credentials created ==="
 echo "File: ~/admin-openrc"
 echo ""
 echo "To use OpenStack CLI, run: source ~/admin-openrc"
+echo ""
+echo "Quick test commands:"
+echo "  openstack user list"
+echo "  openstack project list"
+echo "  openstack service list"
+echo ""
 echo "Next: Run 17-glance-db.sh"
