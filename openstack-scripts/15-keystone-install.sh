@@ -111,7 +111,7 @@ fi
 # ============================================================================
 echo "[5/7] Initializing Fernet keys..."
 
-# Create directories with correct ownership BEFORE running fernet_setup
+# Create directories if they don't exist
 sudo mkdir -p /etc/keystone/fernet-keys
 sudo mkdir -p /etc/keystone/credential-keys
 
@@ -119,22 +119,33 @@ sudo mkdir -p /etc/keystone/credential-keys
 sudo chown keystone:keystone /etc/keystone/fernet-keys
 sudo chown keystone:keystone /etc/keystone/credential-keys
 
-# Now run fernet setup (will create key files)
+# Set correct permissions on directories
+sudo chmod 700 /etc/keystone/fernet-keys
+sudo chmod 700 /etc/keystone/credential-keys
+
+# Run fernet setup (will create key files)
 sudo keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
 sudo keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
 
-# Verify keys were created
-if [ -f /etc/keystone/fernet-keys/0 ]; then
+# Wait a moment for files to be written
+sleep 1
+
+# Verify keys were created (use sudo because keys are owned by keystone with 600 perms)
+if sudo test -f /etc/keystone/fernet-keys/0; then
     echo "  ✓ Fernet keys initialized"
 else
     echo "  ✗ ERROR: Fernet keys not created!"
+    echo "  Debug: Contents of /etc/keystone/fernet-keys/:"
+    sudo ls -la /etc/keystone/fernet-keys/
     exit 1
 fi
 
-if [ -f /etc/keystone/credential-keys/0 ]; then
+if sudo test -f /etc/keystone/credential-keys/0; then
     echo "  ✓ Credential keys initialized"
 else
     echo "  ✗ ERROR: Credential keys not created!"
+    echo "  Debug: Contents of /etc/keystone/credential-keys/:"
+    sudo ls -la /etc/keystone/credential-keys/
     exit 1
 fi
 
@@ -209,8 +220,8 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-# Check Fernet keys exist
-if [ -f /etc/keystone/fernet-keys/0 ] && [ -f /etc/keystone/fernet-keys/1 ]; then
+# Check Fernet keys exist (use sudo test for permission)
+if sudo test -f /etc/keystone/fernet-keys/0 && sudo test -f /etc/keystone/fernet-keys/1; then
     echo "  ✓ Fernet keys exist"
 else
     echo "  ✗ Fernet keys missing!"

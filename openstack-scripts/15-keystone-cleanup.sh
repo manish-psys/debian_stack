@@ -9,34 +9,42 @@ echo "=== Keystone Cleanup Script ==="
 echo ""
 
 # Step 1: Stop services
-echo "[1/5] Stopping services..."
+echo "[1/6] Stopping services..."
 sudo systemctl stop keystone 2>/dev/null || true
 sudo systemctl stop apache2 2>/dev/null || true
 
 # Step 2: Remove keystone package (force remove even if broken)
-echo "[2/5] Removing keystone packages..."
+echo "[2/6] Removing keystone packages..."
 sudo dpkg --remove --force-remove-reinstreq keystone 2>/dev/null || true
 sudo apt-get purge -y keystone 2>/dev/null || true
 sudo apt-get purge -y python3-keystone 2>/dev/null || true
 
-# Step 3: Clean up keystone configuration files
-echo "[3/5] Removing keystone configuration..."
+# Step 3: Clean up keystone configuration files (including keys!)
+echo "[3/6] Removing keystone configuration and keys..."
 sudo rm -rf /etc/keystone
 sudo rm -rf /var/lib/keystone
 sudo rm -f /etc/dbconfig-common/keystone.conf
 
 # Step 4: Clean up Apache keystone config
-echo "[4/5] Cleaning Apache configuration..."
+echo "[4/6] Cleaning Apache configuration..."
 sudo a2dissite keystone 2>/dev/null || true
+sudo a2dissite wsgi-keystone 2>/dev/null || true
 sudo a2disconf servername 2>/dev/null || true
 sudo rm -f /etc/apache2/sites-available/keystone.conf
+sudo rm -f /etc/apache2/sites-available/wsgi-keystone.conf
 sudo rm -f /etc/apache2/sites-enabled/keystone.conf
+sudo rm -f /etc/apache2/sites-enabled/wsgi-keystone.conf
 sudo rm -f /etc/apache2/conf-available/servername.conf
 sudo rm -f /etc/apache2/conf-enabled/servername.conf
 sudo systemctl restart apache2 2>/dev/null || true
 
-# Step 5: Fix any broken packages and autoremove
-echo "[5/5] Fixing broken packages..."
+# Step 5: Clear keystone data from database
+echo "[5/6] Clearing keystone database tables..."
+echo "  (Database will be repopulated on next install)"
+# Note: We don't drop the database, just let db_sync recreate tables
+
+# Step 6: Fix any broken packages and autoremove
+echo "[6/6] Fixing broken packages..."
 sudo apt-get -f install -y 2>/dev/null || true
 sudo apt-get autoremove -y 2>/dev/null || true
 
@@ -54,6 +62,12 @@ if [ -d /etc/keystone ]; then
     echo "  ⚠ WARNING: /etc/keystone still exists"
 else
     echo "  ✓ /etc/keystone removed"
+fi
+
+if sudo test -d /etc/keystone/fernet-keys 2>/dev/null; then
+    echo "  ⚠ WARNING: fernet-keys directory still exists"
+else
+    echo "  ✓ fernet-keys removed"
 fi
 
 if [ -f /etc/dbconfig-common/keystone.conf ]; then
