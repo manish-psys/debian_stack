@@ -2,7 +2,7 @@
 ###############################################################################
 # 15-keystone-install.sh
 # Install and configure Keystone (Identity service)
-# Robust version with dbconfig-common handling
+# Robust, idempotent version with proper permissions handling
 ###############################################################################
 set -e
 
@@ -111,13 +111,32 @@ fi
 # ============================================================================
 echo "[5/7] Initializing Fernet keys..."
 
+# Create directories with correct ownership BEFORE running fernet_setup
 sudo mkdir -p /etc/keystone/fernet-keys
 sudo mkdir -p /etc/keystone/credential-keys
 
+# Fix ownership - this is critical! Must be keystone:keystone
+sudo chown keystone:keystone /etc/keystone/fernet-keys
+sudo chown keystone:keystone /etc/keystone/credential-keys
+
+# Now run fernet setup (will create key files)
 sudo keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
 sudo keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
 
-echo "  ✓ Fernet keys initialized"
+# Verify keys were created
+if [ -f /etc/keystone/fernet-keys/0 ]; then
+    echo "  ✓ Fernet keys initialized"
+else
+    echo "  ✗ ERROR: Fernet keys not created!"
+    exit 1
+fi
+
+if [ -f /etc/keystone/credential-keys/0 ]; then
+    echo "  ✓ Credential keys initialized"
+else
+    echo "  ✗ ERROR: Credential keys not created!"
+    exit 1
+fi
 
 # ============================================================================
 # PART 6: Bootstrap Keystone
@@ -187,6 +206,14 @@ if dpkg -l keystone 2>/dev/null | grep -q "^ii"; then
     echo "  ✓ Keystone package is properly installed"
 else
     echo "  ✗ Keystone package has issues!"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check Fernet keys exist
+if [ -f /etc/keystone/fernet-keys/0 ] && [ -f /etc/keystone/fernet-keys/1 ]; then
+    echo "  ✓ Fernet keys exist"
+else
+    echo "  ✗ Fernet keys missing!"
     ERRORS=$((ERRORS + 1))
 fi
 
