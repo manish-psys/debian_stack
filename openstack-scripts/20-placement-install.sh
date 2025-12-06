@@ -3,6 +3,11 @@
 # 20-placement-install.sh
 # Install and configure Placement service
 # Idempotent - safe to run multiple times
+#
+# Key fixes:
+# - Debian placement-api uses uwsgi (not Apache mod_wsgi)
+# - Stop service before config, sync DB, then restart
+# - Verify database tables exist after sync
 ###############################################################################
 set -e
 
@@ -26,7 +31,7 @@ echo "Using Controller: ${CONTROLLER_IP}"
 # ============================================================================
 # PART 0: Check prerequisites
 # ============================================================================
-echo "[0/6] Checking prerequisites..."
+echo "[0/7] Checking prerequisites..."
 
 if ! command -v crudini &> /dev/null; then
     sudo apt install -y crudini
@@ -53,7 +58,7 @@ fi
 # ============================================================================
 # PART 1: Pre-seed dbconfig-common
 # ============================================================================
-echo "[1/6] Configuring dbconfig-common..."
+echo "[1/7] Configuring dbconfig-common..."
 
 sudo mkdir -p /etc/dbconfig-common
 cat <<EOF | sudo tee /etc/dbconfig-common/placement-api.conf > /dev/null
@@ -74,7 +79,7 @@ echo "  ✓ dbconfig-common configured"
 # ============================================================================
 # PART 2: Install Placement package
 # ============================================================================
-echo "[2/6] Installing Placement..."
+echo "[2/7] Installing Placement..."
 
 export DEBIAN_FRONTEND=noninteractive
 sudo -E apt-get -t bullseye-wallaby-backports install -y \
@@ -85,9 +90,23 @@ sudo -E apt-get -t bullseye-wallaby-backports install -y \
 echo "  ✓ Placement packages installed"
 
 # ============================================================================
-# PART 3: Configure Placement
+# PART 3: Stop placement-api service before configuration
 # ============================================================================
-echo "[3/6] Configuring Placement..."
+echo "[3/7] Stopping placement-api service for configuration..."
+
+# Debian's placement-api uses uwsgi via systemd, NOT Apache
+# The package may auto-start with incomplete config, so we stop it first
+if systemctl is-active --quiet placement-api; then
+    sudo systemctl stop placement-api
+    echo "  ✓ placement-api service stopped"
+else
+    echo "  ✓ placement-api service not running (OK)"
+fi
+
+# ============================================================================
+# PART 4: Configure Placement
+# ============================================================================
+echo "[4/7] Configuring Placement..."
 
 # Backup original config (only if not already backed up)
 if [ -f /etc/placement/placement.conf ] && [ ! -f /etc/placement/placement.conf.orig ]; then
@@ -95,7 +114,7 @@ if [ -f /etc/placement/placement.conf ] && [ ! -f /etc/placement/placement.conf.
     echo "  ✓ Original config backed up"
 fi
 
-# Database connection
+# Database connection - NOTE: section is 'placement_database' for Placement
 sudo crudini --set /etc/placement/placement.conf placement_database connection \
     "mysql+pymysql://placement:${PLACEMENT_DB_PASS}@localhost/placement"
 
@@ -113,48 +132,77 @@ else
     exit 1
 fi
 
+if sudo grep -q "^region_name = ${REGION_NAME}" /etc/placement/placement.conf; then
+    echo "  ✓ Region configured: ${REGION_NAME}"
+else
+    echo "  ✗ ERROR: Region not set correctly!"
+    exit 1
+fi
+
 echo "  ✓ Placement configured"
 
 # ============================================================================
-# PART 4: Sync database
+# PART 5: Sync database (MUST happen before service starts)
 # ============================================================================
-echo "[4/6] Syncing Placement database..."
+echo "[5/7] Syncing Placement database..."
 
 # db sync is idempotent - safe to run multiple times
-if sudo -u placement placement-manage db sync 2>&1; then
-    echo "  ✓ Database synced"
+# Run as root since placement user may not have shell access
+if sudo placement-manage db sync 2>&1; then
+    echo "  ✓ Database sync command completed"
 else
     echo "  ✗ ERROR: Database sync failed!"
     echo "  Check database connection and credentials"
     exit 1
 fi
 
-# ============================================================================
-# PART 5: Restart Apache
-# ============================================================================
-echo "[5/6] Restarting Apache..."
+# CRITICAL: Verify tables actually exist
+TABLE_COUNT=$(sudo mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='placement';" 2>/dev/null || echo "0")
+if [ "$TABLE_COUNT" -ge 10 ]; then
+    echo "  ✓ Database tables created: ${TABLE_COUNT} tables"
+else
+    echo "  ✗ ERROR: Database sync did not create tables! Found: ${TABLE_COUNT}"
+    echo "  Expected at least 10 tables (traits, resource_classes, allocations, etc.)"
+    exit 1
+fi
 
-sudo systemctl restart apache2
-sudo systemctl enable apache2
-
-echo "  ✓ Apache restarted"
+# Verify critical tables exist
+for TABLE in traits resource_classes resource_providers allocations; do
+    if sudo mysql -N -e "SELECT 1 FROM information_schema.tables WHERE table_schema='placement' AND table_name='${TABLE}';" 2>/dev/null | grep -q 1; then
+        echo "  ✓ Table exists: ${TABLE}"
+    else
+        echo "  ✗ ERROR: Missing table: ${TABLE}"
+        exit 1
+    fi
+done
 
 # ============================================================================
-# PART 6: Wait and verify service is ready
+# PART 6: Start placement-api service
 # ============================================================================
-echo "[6/6] Waiting for Placement service to be ready..."
+echo "[6/7] Starting placement-api service..."
 
-# Wait for Apache to fully start and Placement to respond
-MAX_RETRIES=10
+# Debian's placement-api runs via uwsgi (NOT Apache)
+sudo systemctl start placement-api
+sudo systemctl enable placement-api
+
+echo "  ✓ placement-api service started"
+
+# Wait for service to be ready
+MAX_RETRIES=15
 RETRY_INTERVAL=2
 RETRY_COUNT=0
 
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     if sudo ss -tlnp | grep -q ':8778'; then
         # Port is listening, now check if API responds
-        if curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8778/" 2>/dev/null | grep -q "200\|300\|401"; then
-            echo "  ✓ Placement service is ready"
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8778/" 2>/dev/null || echo "000")
+        if [[ "$HTTP_CODE" =~ ^(200|300|401)$ ]]; then
+            echo "  ✓ Placement API responding (HTTP ${HTTP_CODE})"
             break
+        elif [ "$HTTP_CODE" = "500" ]; then
+            echo "  ✗ ERROR: Placement returning HTTP 500 - check logs!"
+            sudo journalctl -u placement-api -n 20 --no-pager
+            exit 1
         fi
     fi
     RETRY_COUNT=$((RETRY_COUNT + 1))
@@ -163,26 +211,29 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
 done
 
 if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-    echo "  ⚠ WARNING: Placement may not be fully ready yet"
+    echo "  ✗ ERROR: Placement service did not become ready!"
+    echo "  Checking logs..."
+    sudo journalctl -u placement-api -n 30 --no-pager
+    exit 1
 fi
 
 # ============================================================================
-# Verification
+# PART 7: Verification
 # ============================================================================
+echo "[7/7] Verifying Placement installation..."
 echo ""
-echo "Verifying Placement installation..."
 
 ERRORS=0
 
-# Check Apache is running
-if systemctl is-active --quiet apache2; then
-    echo "  ✓ Apache is running"
+# Check placement-api service is running (uwsgi-based)
+if systemctl is-active --quiet placement-api; then
+    echo "  ✓ placement-api service is running"
 else
-    echo "  ✗ Apache is NOT running!"
+    echo "  ✗ placement-api service is NOT running!"
     ERRORS=$((ERRORS + 1))
 fi
 
-# Check Placement port is listening (via Apache)
+# Check Placement port is listening
 if sudo ss -tlnp | grep -q ':8778'; then
     echo "  ✓ Placement is listening on port 8778"
 else
@@ -207,25 +258,44 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-# Test Placement API
+# Test Placement API via OpenStack CLI
 source ~/admin-openrc
 if openstack --os-placement-api-version 1.2 resource class list &>/dev/null; then
-    echo "  ✓ Placement API responding"
+    echo "  ✓ Placement API responding to OpenStack CLI"
+    
+    # Count resource classes
+    RC_COUNT=$(openstack --os-placement-api-version 1.2 resource class list -f value | wc -l)
+    echo "  ✓ Resource classes available: ${RC_COUNT}"
+    
+    # Show sample
     echo ""
     echo "Sample resource classes:"
     openstack --os-placement-api-version 1.2 resource class list --sort-column name | head -10
 else
-    echo "  ✗ Placement API not responding!"
-    echo "  Check logs: sudo tail -50 /var/log/apache2/placement-api_error.log"
+    echo "  ✗ Placement API not responding to OpenStack CLI!"
+    echo "  Check logs: sudo journalctl -u placement-api -n 50"
     ERRORS=$((ERRORS + 1))
 fi
 
+# Final summary
 echo ""
+echo "=========================================="
 if [ $ERRORS -eq 0 ]; then
     echo "=== Placement installed successfully ==="
+    echo "=========================================="
+    echo ""
+    echo "Service: placement-api (uwsgi on port 8778)"
+    echo "Config:  /etc/placement/placement.conf"
+    echo "Logs:    sudo journalctl -u placement-api -f"
+    echo ""
+    echo "Quick test commands:"
+    echo "  curl http://${CONTROLLER_IP}:8778/"
+    echo "  openstack --os-placement-api-version 1.2 resource class list"
+    echo "  openstack --os-placement-api-version 1.6 trait list"
 else
     echo "=== Placement installation completed with $ERRORS error(s) ==="
-    echo "Check Apache logs: sudo tail -50 /var/log/apache2/error.log"
+    echo "=========================================="
+    echo "Check logs: sudo journalctl -u placement-api -n 50"
 fi
 
 echo ""
