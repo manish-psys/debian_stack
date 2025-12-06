@@ -41,12 +41,23 @@ if ! systemctl is-active --quiet mariadb; then
 fi
 echo "  ✓ MariaDB is running"
 
-# Check Keystone is accessible
-if ! source ~/admin-openrc 2>/dev/null; then
-    echo "  ✗ ERROR: admin-openrc not found. Run Keystone scripts first!"
+# Check admin-openrc exists
+if [ ! -f ~/admin-openrc ]; then
+    echo "  ✗ ERROR: ~/admin-openrc not found. Run Keystone scripts first!"
     exit 1
 fi
 
+# Source OpenStack credentials
+source ~/admin-openrc
+
+# Verify openstack CLI is available
+if ! command -v openstack &>/dev/null; then
+    echo "  ✗ ERROR: openstack command not found!"
+    exit 1
+fi
+echo "  ✓ OpenStack CLI available"
+
+# Test Keystone authentication
 if ! openstack token issue &>/dev/null; then
     echo "  ✗ ERROR: Cannot authenticate with Keystone!"
     exit 1
@@ -104,7 +115,6 @@ echo ""
 echo "[2/4] Configuring database user..."
 
 # Create or update nova user with all grants
-# Using CREATE OR REPLACE for idempotency (MariaDB 10.1+)
 sudo mysql <<EOF
 -- Create user if not exists, update password if exists
 CREATE USER IF NOT EXISTS 'nova'@'localhost' IDENTIFIED BY '${NOVA_DB_PASS}';
@@ -141,6 +151,7 @@ fi
 echo ""
 echo "[3/4] Creating Keystone user..."
 
+# Ensure credentials are loaded
 source ~/admin-openrc
 
 # Create nova user if not exists
@@ -176,11 +187,46 @@ fi
 echo ""
 echo "[4/4] Creating compute service and endpoints..."
 
+# Ensure credentials are loaded
 source ~/admin-openrc
 
-# Use helper function from openstack-env.sh
-# Nova API is on port 8774 with /v2.1 path
-create_service_endpoints "nova" "compute" "OpenStack Compute" "8774" "/v2.1"
+# Nova API endpoint URL (includes /v2.1 path)
+NOVA_ENDPOINT="http://${CONTROLLER_IP}:8774/v2.1"
+
+# Create compute service if not exists
+if openstack service show nova &>/dev/null; then
+    echo "  ✓ Service 'nova' already exists"
+else
+    openstack service create --name nova --description "OpenStack Compute" compute
+    echo "  ✓ Service 'nova' created"
+fi
+
+# Get existing endpoints for nova service
+EXISTING_ENDPOINTS=$(openstack endpoint list --service nova -f value -c Interface 2>/dev/null || true)
+
+# Create public endpoint if not exists
+if echo "$EXISTING_ENDPOINTS" | grep -q "public"; then
+    echo "  ✓ Public endpoint already exists"
+else
+    openstack endpoint create --region "${REGION_NAME}" compute public "${NOVA_ENDPOINT}"
+    echo "  ✓ Public endpoint created"
+fi
+
+# Create internal endpoint if not exists
+if echo "$EXISTING_ENDPOINTS" | grep -q "internal"; then
+    echo "  ✓ Internal endpoint already exists"
+else
+    openstack endpoint create --region "${REGION_NAME}" compute internal "${NOVA_ENDPOINT}"
+    echo "  ✓ Internal endpoint created"
+fi
+
+# Create admin endpoint if not exists
+if echo "$EXISTING_ENDPOINTS" | grep -q "admin"; then
+    echo "  ✓ Admin endpoint already exists"
+else
+    openstack endpoint create --region "${REGION_NAME}" compute admin "${NOVA_ENDPOINT}"
+    echo "  ✓ Admin endpoint created"
+fi
 
 # ============================================================================
 # Verification Summary

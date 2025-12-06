@@ -22,28 +22,40 @@ fi
 
 echo ""
 echo "[1/4] Removing Keystone endpoints and service..."
-source ~/admin-openrc 2>/dev/null || true
+
+# Source credentials if available
+if [ -f ~/admin-openrc ]; then
+    source ~/admin-openrc
+fi
 
 # Delete endpoints first (they reference the service)
-for ENDPOINT_ID in $(openstack endpoint list --service nova -f value -c ID 2>/dev/null); do
-    openstack endpoint delete "$ENDPOINT_ID" 2>/dev/null || true
-    echo "  ✓ Deleted endpoint $ENDPOINT_ID"
-done
+if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
+    for ENDPOINT_ID in $(openstack endpoint list --service nova -f value -c ID 2>/dev/null); do
+        openstack endpoint delete "$ENDPOINT_ID" 2>/dev/null || true
+        echo "  ✓ Deleted endpoint $ENDPOINT_ID"
+    done
 
-# Delete service
-if openstack service show nova &>/dev/null; then
-    openstack service delete nova
-    echo "  ✓ Deleted 'nova' service"
+    # Delete service
+    if openstack service show nova &>/dev/null; then
+        openstack service delete nova
+        echo "  ✓ Deleted 'nova' service"
+    else
+        echo "  ✓ Service 'nova' not found (OK)"
+    fi
 else
-    echo "  ✓ Service 'nova' not found (OK)"
+    echo "  ⚠ OpenStack CLI not available, skipping Keystone cleanup"
 fi
 
 echo "[2/4] Removing Keystone user..."
-if openstack user show nova &>/dev/null; then
-    openstack user delete nova
-    echo "  ✓ Deleted 'nova' user"
+if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
+    if openstack user show nova &>/dev/null; then
+        openstack user delete nova
+        echo "  ✓ Deleted 'nova' user"
+    else
+        echo "  ✓ User 'nova' not found (OK)"
+    fi
 else
-    echo "  ✓ User 'nova' not found (OK)"
+    echo "  ⚠ OpenStack CLI not available, skipping user cleanup"
 fi
 
 echo "[3/4] Removing databases..."
@@ -58,7 +70,8 @@ done
 
 echo "[4/4] Removing database user..."
 if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | grep -q nova; then
-    sudo mysql -e "DROP USER 'nova'@'localhost'; DROP USER 'nova'@'%';" 2>/dev/null || true
+    sudo mysql -e "DROP USER IF EXISTS 'nova'@'localhost';"
+    sudo mysql -e "DROP USER IF EXISTS 'nova'@'%';"
     sudo mysql -e "FLUSH PRIVILEGES;"
     echo "  ✓ Dropped database user 'nova'"
 else
@@ -88,21 +101,23 @@ else
     echo "  ✓ Database user 'nova' removed"
 fi
 
-# Check Keystone user removed
-source ~/admin-openrc 2>/dev/null || true
-if openstack user show nova &>/dev/null 2>&1; then
-    echo "  ✗ WARNING: Keystone user 'nova' still exists"
-    CLEAN=false
-else
-    echo "  ✓ Keystone user 'nova' removed"
-fi
+# Check Keystone items if CLI available
+if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
+    # Check Keystone user removed
+    if openstack user show nova &>/dev/null 2>&1; then
+        echo "  ✗ WARNING: Keystone user 'nova' still exists"
+        CLEAN=false
+    else
+        echo "  ✓ Keystone user 'nova' removed"
+    fi
 
-# Check service removed
-if openstack service show nova &>/dev/null 2>&1; then
-    echo "  ✗ WARNING: Service 'nova' still exists"
-    CLEAN=false
-else
-    echo "  ✓ Service 'nova' removed"
+    # Check service removed
+    if openstack service show nova &>/dev/null 2>&1; then
+        echo "  ✗ WARNING: Service 'nova' still exists"
+        CLEAN=false
+    else
+        echo "  ✓ Service 'nova' removed"
+    fi
 fi
 
 echo ""
