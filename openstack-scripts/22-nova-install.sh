@@ -84,6 +84,14 @@ if ! systemctl is-active --quiet rabbitmq-server; then
 fi
 echo "  ✓ RabbitMQ is running"
 
+# Check RabbitMQ openstack user exists
+if ! sudo rabbitmqctl list_users 2>/dev/null | grep -q "^${RABBIT_USER}"; then
+    echo "  ✗ ERROR: RabbitMQ user '${RABBIT_USER}' not found!"
+    echo "  Please run 12-openstack-base.sh to create the RabbitMQ user."
+    exit 1
+fi
+echo "  ✓ RabbitMQ user '${RABBIT_USER}' exists"
+
 # Check Placement API is responding
 if ! curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8778/" | grep -q "200"; then
     echo "  ✗ ERROR: Placement API not responding on port 8778!"
@@ -290,12 +298,11 @@ echo "  ✓ cell0 mapped"
 
 # Create cell1 if not exists
 echo "  Creating cell1..."
-CELL1_EXISTS=$(sudo nova-manage cell_v2 list_cells 2>/dev/null | grep -c "cell1" || echo "0")
-if [ "$CELL1_EXISTS" -eq 0 ]; then
+if sudo nova-manage cell_v2 list_cells 2>/dev/null | grep -q "cell1"; then
+    echo "  ✓ cell1 already exists"
+else
     sudo nova-manage cell_v2 create_cell --name=cell1 --verbose
     echo "  ✓ cell1 created"
-else
-    echo "  ✓ cell1 already exists"
 fi
 
 # Sync main database
@@ -327,12 +334,26 @@ for SERVICE in nova-api nova-conductor nova-scheduler nova-novncproxy nova-compu
     sudo systemctl start "$SERVICE"
     sudo systemctl enable "$SERVICE"
     
+    # nova-novncproxy is a proxy service that may show as "activating" briefly
+    # Give it a moment and check again
+    sleep 1
+    
     if systemctl is-active --quiet "$SERVICE"; then
         echo "  ✓ $SERVICE started"
     else
-        echo "  ✗ ERROR: $SERVICE failed to start!"
-        sudo journalctl -u "$SERVICE" -n 10 --no-pager
-        exit 1
+        # For novncproxy, check if it's enabled and was recently active (it starts on demand)
+        if [ "$SERVICE" = "nova-novncproxy" ]; then
+            if systemctl is-enabled --quiet "$SERVICE"; then
+                echo "  ✓ $SERVICE enabled (starts on VNC connection)"
+            else
+                echo "  ✗ ERROR: $SERVICE failed to enable!"
+                exit 1
+            fi
+        else
+            echo "  ✗ ERROR: $SERVICE failed to start!"
+            sudo journalctl -u "$SERVICE" -n 10 --no-pager
+            exit 1
+        fi
     fi
 done
 
