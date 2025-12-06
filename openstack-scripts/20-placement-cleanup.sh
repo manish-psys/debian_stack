@@ -76,15 +76,27 @@ fi
 echo "[4/5] Clearing placement database tables..."
 # Drop all tables but keep the database (Script 19 created the DB)
 if sudo mysql -e "USE placement" 2>/dev/null; then
-    # Get list of tables and drop them
-    TABLES=$(sudo mysql -N -e "SELECT table_name FROM information_schema.tables WHERE table_schema='placement';")
-    if [ -n "$TABLES" ]; then
-        # Disable foreign key checks for clean drop
-        sudo mysql -e "SET FOREIGN_KEY_CHECKS=0;"
-        for TABLE in $TABLES; do
-            sudo mysql -e "DROP TABLE IF EXISTS placement.${TABLE};"
-        done
-        sudo mysql -e "SET FOREIGN_KEY_CHECKS=1;"
+    # Check if there are tables to drop
+    TABLE_COUNT=$(sudo mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='placement';" 2>/dev/null || echo "0")
+    if [ "$TABLE_COUNT" -gt 0 ]; then
+        # Drop ALL tables in a SINGLE session with FK checks disabled
+        # This avoids the issue where each mysql -e runs in separate session
+        sudo mysql placement <<'EOF'
+SET FOREIGN_KEY_CHECKS=0;
+DROP TABLE IF EXISTS alembic_version;
+DROP TABLE IF EXISTS allocations;
+DROP TABLE IF EXISTS consumers;
+DROP TABLE IF EXISTS inventories;
+DROP TABLE IF EXISTS placement_aggregates;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS resource_classes;
+DROP TABLE IF EXISTS resource_provider_aggregates;
+DROP TABLE IF EXISTS resource_provider_traits;
+DROP TABLE IF EXISTS resource_providers;
+DROP TABLE IF EXISTS traits;
+DROP TABLE IF EXISTS users;
+SET FOREIGN_KEY_CHECKS=1;
+EOF
         echo "  ✓ All tables dropped from placement database"
     else
         echo "  ✓ No tables to drop"
