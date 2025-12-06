@@ -164,6 +164,18 @@ sudo -E apt-get -t bullseye-wallaby-backports install -y \
 
 echo "  ✓ Nova packages installed"
 
+# Configure nova-consoleproxy to use noVNC (required for Debian)
+# Without this, nova-novncproxy service exits immediately
+echo "  Configuring console proxy type..."
+cat <<EOF | sudo tee /etc/default/nova-consoleproxy > /dev/null
+# Console proxy type: novnc or spicehtml5
+NOVA_CONSOLE_PROXY_TYPE="novnc"
+
+# Enable serial proxy (TRUE/FALSE)
+NOVA_SERIAL_PROXY_START=false
+EOF
+echo "  ✓ Console proxy configured for noVNC"
+
 # ============================================================================
 # PART 3: Stop Nova services before configuration
 # ============================================================================

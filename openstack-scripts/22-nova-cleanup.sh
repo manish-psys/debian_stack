@@ -66,6 +66,12 @@ for CONF in nova-api.conf nova-common.conf; do
     fi
 done
 
+# Remove nova-consoleproxy default config
+if [ -f /etc/default/nova-consoleproxy ]; then
+    sudo rm -f /etc/default/nova-consoleproxy
+    echo "  ✓ /etc/default/nova-consoleproxy removed"
+fi
+
 # Remove log directory
 if [ -d /var/log/nova ]; then
     sudo rm -rf /var/log/nova
