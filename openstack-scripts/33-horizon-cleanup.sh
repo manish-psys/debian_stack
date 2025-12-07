@@ -4,9 +4,10 @@
 # Remove Horizon Dashboard
 #
 # This script:
+# - Disables and removes Horizon Apache site
 # - Removes openstack-dashboard package
-# - Cleans up Apache configuration
-# - Removes configuration files
+# - Cleans up configuration files
+# - Re-enables default Apache site
 #
 # NOTE: Uses safe removal to avoid cascade deletion
 ###############################################################################
@@ -15,19 +16,47 @@ set -e
 echo "=== Cleanup: Horizon Dashboard ==="
 
 ###############################################################################
-# [1/4] Stop Services
+# [1/5] Disable Horizon Apache Site
 ###############################################################################
-echo "[1/4] Stopping related services..."
+echo "[1/5] Disabling Horizon Apache site..."
 
-# Apache will continue running (needed for Keystone)
-echo "  ✓ Apache will remain running (serves Keystone)"
+if [ -L /etc/apache2/sites-enabled/horizon.conf ]; then
+    sudo a2dissite horizon
+    echo "  ✓ Disabled Horizon site"
+else
+    echo "  ✓ Horizon site already disabled"
+fi
 
 ###############################################################################
-# [2/4] Remove Package
+# [2/5] Re-enable Default Site
 ###############################################################################
-echo "[2/4] Removing Horizon package..."
+echo "[2/5] Re-enabling default Apache site..."
 
-if dpkg -l | grep -q "openstack-dashboard"; then
+if [ ! -L /etc/apache2/sites-enabled/000-default.conf ]; then
+    sudo a2ensite 000-default
+    echo "  ✓ Enabled default site"
+else
+    echo "  ✓ Default site already enabled"
+fi
+
+###############################################################################
+# [3/5] Remove Horizon Apache Config
+###############################################################################
+echo "[3/5] Removing Horizon Apache configuration..."
+
+if [ -f /etc/apache2/sites-available/horizon.conf ]; then
+    sudo rm -f /etc/apache2/sites-available/horizon.conf
+    echo "  ✓ Removed /etc/apache2/sites-available/horizon.conf"
+else
+    echo "  ✓ Apache config already removed"
+fi
+
+###############################################################################
+# [4/5] Remove Package
+###############################################################################
+echo "[4/5] Removing Horizon package..."
+
+if dpkg -l | grep -q "^ii.*openstack-dashboard"; then
     # Use --no-auto-remove to prevent cascade deletion
     sudo apt remove --no-auto-remove -y openstack-dashboard
     echo "  ✓ openstack-dashboard removed"
@@ -36,21 +65,9 @@ else
 fi
 
 ###############################################################################
-# [3/4] Disable Apache Config
+# [5/5] Cleanup Files and Restart Apache
 ###############################################################################
-echo "[3/4] Disabling Apache configuration..."
-
-if [ -L /etc/apache2/conf-enabled/openstack-dashboard.conf ]; then
-    sudo a2disconf openstack-dashboard 2>/dev/null || true
-    echo "  ✓ Disabled openstack-dashboard Apache config"
-else
-    echo "  ✓ Apache config already disabled"
-fi
-
-###############################################################################
-# [4/4] Cleanup Files
-###############################################################################
-echo "[4/4] Cleaning up configuration files..."
+echo "[5/5] Cleaning up files and restarting Apache..."
 
 # Remove config directory
 if [ -d /etc/openstack-dashboard ]; then
@@ -70,12 +87,19 @@ fi
 sudo systemctl restart apache2
 echo "  ✓ Apache restarted"
 
+# Verify Keystone still works
+if curl -s "http://localhost:5000/v3" | grep -q "version"; then
+    echo "  ✓ Keystone still accessible"
+else
+    echo "  ⚠ Keystone may need attention"
+fi
+
 echo ""
 echo "=========================================="
 echo "=== Horizon Cleanup Complete ==="
 echo "=========================================="
 echo ""
 echo "Horizon dashboard has been removed."
-echo "Apache continues to serve Keystone."
+echo "Apache continues to serve Keystone on port 5000."
 echo ""
 echo "To reinstall: ./33-horizon-install.sh"
