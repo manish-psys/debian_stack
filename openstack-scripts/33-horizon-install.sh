@@ -8,7 +8,7 @@
 # - Configures local_settings.py for Keystone v3
 # - Creates Apache virtual host configuration (Debian package doesn't include it!)
 # - Sets up memcached session backend
-# - Configures proper API versions
+# - Configures proper API versions and static file paths
 # - Enables all installed OpenStack services in dashboard
 #
 # Prerequisites:
@@ -16,8 +16,11 @@
 # - Memcached running
 # - Apache2 running (for Keystone)
 #
-# Note: Debian's openstack-dashboard package does NOT include Apache config.
-#       This script creates it manually.
+# Key Debian-specific issues addressed:
+# 1. Debian package does NOT include Apache config - we create it manually
+# 2. WEBROOT must be set to '/horizon/' since we mount at /horizon
+# 3. STATIC_ROOT/STATIC_URL must point to correct locations
+# 4. COMPRESS_OFFLINE must be True to use pre-compressed static files
 ###############################################################################
 set -e
 
@@ -42,8 +45,10 @@ TIME_ZONE="Asia/Kolkata"  # Change to your timezone
 APACHE_SITE="/etc/apache2/sites-available/horizon.conf"
 WSGI_FILE="/usr/share/openstack-dashboard/wsgi.py"
 PYTHON_PATH="/usr/lib/python3/dist-packages"
-STATIC_PATH="/var/lib/openstack-dashboard/static"
 HORIZON_CONF_DIR="/etc/openstack-dashboard"
+
+# Static files location (Debian puts them here during package install)
+STATIC_ROOT="/usr/lib/python3/dist-packages/static"
 
 ###############################################################################
 # [1/7] Prerequisites Check
@@ -94,6 +99,13 @@ if [ ! -f "$WSGI_FILE" ]; then
     exit 1
 fi
 echo "  ✓ WSGI file exists"
+
+# Verify static files exist
+if [ ! -d "$STATIC_ROOT/dashboard" ]; then
+    echo "  ✗ ERROR: Static files not found at $STATIC_ROOT"
+    exit 1
+fi
+echo "  ✓ Static files exist at $STATIC_ROOT"
 
 ###############################################################################
 # [3/7] Backup Original Configuration
@@ -152,7 +164,32 @@ cat <<'HORIZON_EOF' | sudo tee -a "$HORIZON_CONF" > /dev/null
 # === CUSTOM OPENSTACK CONFIG ===
 # Added by 33-horizon-install.sh
 
-# Session engine - use memcached
+# =============================================================================
+# CRITICAL: WEBROOT Configuration
+# Since we mount Horizon at /horizon (not /), Django needs to know this
+# Without this, login redirects go to /auth/login/ instead of /horizon/auth/login/
+# =============================================================================
+WEBROOT = '/horizon/'
+LOGIN_URL = '/horizon/auth/login/'
+LOGOUT_URL = '/horizon/auth/logout/'
+LOGIN_REDIRECT_URL = '/horizon/'
+
+# =============================================================================
+# CRITICAL: Static Files Configuration
+# Debian installs static files to /usr/lib/python3/dist-packages/static/
+# We must tell Django where they are and use pre-compressed files
+# =============================================================================
+STATIC_ROOT = '/usr/lib/python3/dist-packages/static'
+STATIC_URL = '/horizon/static/'
+
+# Use pre-compressed static files (they exist from package install)
+# This prevents Django compressor from trying to write to read-only system dirs
+COMPRESS_OFFLINE = True
+COMPRESS_ENABLED = True
+
+# =============================================================================
+# Session Configuration - use memcached
+# =============================================================================
 SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
 
 CACHES = {
@@ -162,7 +199,9 @@ CACHES = {
     },
 }
 
-# API versions
+# =============================================================================
+# API Versions
+# =============================================================================
 OPENSTACK_API_VERSIONS = {
     "identity": 3,
     "image": 2,
@@ -175,7 +214,11 @@ OPENSTACK_KEYSTONE_DEFAULT_ROLE = "member"
 # Disable SSL certificate verification (for self-signed certs)
 OPENSTACK_SSL_NO_VERIFY = True
 
-# Enable services in dashboard
+# =============================================================================
+# Service-specific Settings
+# =============================================================================
+
+# Neutron (Network) settings
 OPENSTACK_NEUTRON_NETWORK = {
     'enable_router': True,
     'enable_quotas': True,
@@ -245,9 +288,10 @@ sudo tee "$APACHE_SITE" > /dev/null <<APACHE_EOF
         </Files>
     </Directory>
     
-    # Static files (CSS, JS, images)
-    Alias /horizon/static ${STATIC_PATH}
-    <Directory ${STATIC_PATH}>
+    # Static files (CSS, JS, images) - served directly by Apache
+    # These are in /usr/lib/python3/dist-packages/static/ on Debian
+    Alias /horizon/static ${STATIC_ROOT}
+    <Directory ${STATIC_ROOT}>
         Options FollowSymLinks
         Require all granted
     </Directory>
@@ -327,20 +371,26 @@ echo "Verifying Horizon installation..."
 # Wait for WSGI to initialize
 sleep 2
 
-# Test Horizon URL
-HORIZON_URL="http://${CONTROLLER_IP}/horizon"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${HORIZON_URL}/" --max-time 10 2>/dev/null || echo "000")
+# Test Horizon login page directly
+HORIZON_LOGIN="http://${CONTROLLER_IP}/horizon/auth/login/"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${HORIZON_LOGIN}" --max-time 10 2>/dev/null || echo "000")
 
 if [ "$HTTP_CODE" = "200" ]; then
-    echo "  ✓ Horizon accessible (HTTP 200)"
-elif [ "$HTTP_CODE" = "302" ]; then
-    echo "  ✓ Horizon accessible (HTTP 302 - redirect to login)"
+    echo "  ✓ Horizon login page accessible (HTTP 200)"
 elif [ "$HTTP_CODE" = "500" ]; then
     echo "  ✗ Horizon returned HTTP 500 - check logs"
     echo "    View errors: sudo tail -30 /var/log/apache2/horizon_error.log"
 else
-    echo "  ⚠ Horizon returned HTTP ${HTTP_CODE}"
+    echo "  ⚠ Horizon login returned HTTP ${HTTP_CODE}"
     echo "    Check: sudo tail -30 /var/log/apache2/horizon_error.log"
+fi
+
+# Test static files
+STATIC_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}/horizon/static/dashboard/css/output.361cca58bb99.css" --max-time 5 2>/dev/null || echo "000")
+if [ "$STATIC_CODE" = "200" ]; then
+    echo "  ✓ Static files accessible (HTTP 200)"
+else
+    echo "  ⚠ Static files returned HTTP ${STATIC_CODE}"
 fi
 
 # Verify Keystone is still accessible
@@ -382,8 +432,7 @@ echo ""
 echo "  # View Horizon error logs"
 echo "  sudo tail -f /var/log/apache2/horizon_error.log"
 echo ""
-echo "  # Clear Horizon cache if issues"
-echo "  sudo rm -rf /var/lib/openstack-dashboard/secret-key"
-echo "  sudo systemctl restart apache2"
+echo "  # Test login page directly"
+echo "  curl -I http://${CONTROLLER_IP}/horizon/auth/login/"
 echo ""
 echo "Next: Access the dashboard in your browser and login"
