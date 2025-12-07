@@ -107,9 +107,11 @@ fi
 echo ""
 echo "[4/5] Starting Neutron services..."
 
-# List of Neutron services (OVS-based, not Linux Bridge)
+# Debian splits neutron-server into neutron-api + neutron-rpc-server
+# List of Neutron services (Debian Wallaby backports naming)
 NEUTRON_SERVICES=(
-    "neutron-server"
+    "neutron-api"
+    "neutron-rpc-server"
     "neutron-openvswitch-agent"
     "neutron-dhcp-agent"
     "neutron-metadata-agent"
@@ -209,7 +211,8 @@ if [ $ERRORS -eq 0 ]; then
     echo "=========================================="
     echo ""
     echo "Services running:"
-    echo "  - neutron-server (API on port 9696)"
+    echo "  - neutron-api (API on port 9696)"
+    echo "  - neutron-rpc-server (RPC backend)"
     echo "  - neutron-openvswitch-agent (OVS integration)"
     echo "  - neutron-dhcp-agent (DHCP for VMs)"
     echo "  - neutron-metadata-agent (Metadata for VMs)"
