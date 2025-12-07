@@ -69,16 +69,17 @@ echo "  ✓ Nova service exists"
 echo ""
 echo "[2/5] Creating Neutron database..."
 
-# Check if database exists
-DB_EXISTS=$(sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | grep -c "neutron" || echo "0")
-
-if [ "$DB_EXISTS" -eq 0 ]; then
-    sudo mysql <<EOF
-CREATE DATABASE neutron;
-EOF
-    echo "  ✓ Database 'neutron' created"
-else
+# Check if database exists and create if not
+if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | grep -q "neutron"; then
     echo "  ✓ Database 'neutron' already exists"
+else
+    sudo mysql -e "CREATE DATABASE neutron;"
+    if [ $? -eq 0 ]; then
+        echo "  ✓ Database 'neutron' created"
+    else
+        echo "  ✗ ERROR: Failed to create database 'neutron'!"
+        exit 1
+    fi
 fi
 
 # Create or update user (idempotent)
@@ -91,7 +92,13 @@ ALTER USER 'neutron'@'localhost' IDENTIFIED BY '${NEUTRON_DB_PASS}';
 ALTER USER 'neutron'@'%' IDENTIFIED BY '${NEUTRON_DB_PASS}';
 FLUSH PRIVILEGES;
 EOF
-echo "  ✓ Database user 'neutron' configured"
+
+if [ $? -eq 0 ]; then
+    echo "  ✓ Database user 'neutron' configured"
+else
+    echo "  ✗ ERROR: Failed to configure database user!"
+    exit 1
+fi
 
 # ============================================================================
 # PART 3: Create Keystone user
