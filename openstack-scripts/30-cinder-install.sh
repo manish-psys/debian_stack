@@ -209,9 +209,11 @@ echo ""
 echo "[5/8] Configuring cinder.conf..."
 
 # [database] section
+# NOTE: Using localhost for database connection (same as other OpenStack services)
+# MariaDB listens on 127.0.0.1 by default, not on external IP
 echo "  Configuring [database]..."
 sudo crudini --set "$CINDER_CONF" database connection \
-    "mysql+pymysql://cinder:${CINDER_DB_PASS}@${CONTROLLER_IP}/cinder"
+    "mysql+pymysql://cinder:${CINDER_DB_PASS}@localhost/cinder"
 echo "  ✓ [database] configured"
 
 # [DEFAULT] section
