@@ -32,8 +32,8 @@ echo "=== Step 27: Neutron Database Sync and Service Start ==="
 echo ""
 echo "[1/5] Checking prerequisites..."
 
-# Check Neutron config exists
-if [ ! -f /etc/neutron/neutron.conf ]; then
+# Check Neutron config exists (needs sudo due to permissions)
+if ! sudo test -f /etc/neutron/neutron.conf; then
     echo "  ✗ ERROR: /etc/neutron/neutron.conf not found!"
     echo "  Run 26-neutron-install.sh first."
     exit 1
@@ -41,14 +41,14 @@ fi
 echo "  ✓ Neutron config exists"
 
 # Check ML2 config exists
-if [ ! -f /etc/neutron/plugins/ml2/ml2_conf.ini ]; then
+if ! sudo test -f /etc/neutron/plugins/ml2/ml2_conf.ini; then
     echo "  ✗ ERROR: ML2 config not found!"
     exit 1
 fi
 echo "  ✓ ML2 config exists"
 
 # Check OVS agent config exists
-if [ ! -f /etc/neutron/plugins/ml2/openvswitch_agent.ini ]; then
+if ! sudo test -f /etc/neutron/plugins/ml2/openvswitch_agent.ini; then
     echo "  ✗ ERROR: OVS agent config not found!"
     exit 1
 fi
