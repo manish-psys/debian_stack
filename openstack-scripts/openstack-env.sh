@@ -55,6 +55,14 @@ export RABBIT_PASS="rabbitpass123"
 export METADATA_SECRET="metadatasecret123"
 
 # =============================================================================
+# OVN CONFIGURATION
+# =============================================================================
+export OVN_NB_DB="unix:/var/run/ovn/ovnsb_db.sock"
+export OVN_SB_DB="unix:/var/run/ovn/ovnsb_db.sock"
+export PROVIDER_NETWORK_NAME="physnet1"
+export PROVIDER_BRIDGE_NAME="br-provider"
+
+# =============================================================================
 # CEPH CONFIGURATION
 # =============================================================================
 export CEPH_GLANCE_POOL="images"
@@ -96,6 +104,7 @@ configure_keystone_authtoken() {
 # =============================================================================
 # HELPER FUNCTION: Create service endpoints in Keystone
 # Usage: create_service_endpoints <service_name> <service_type> <description> <port> [path]
+# NOTE: Caller must have sourced admin-openrc before calling this function
 # =============================================================================
 create_service_endpoints() {
     local SERVICE_NAME="$1"
@@ -105,6 +114,22 @@ create_service_endpoints() {
     local PATH="${5:-}"  # Optional path suffix
     
     local BASE_URL="http://${CONTROLLER_IP}:${PORT}${PATH}"
+    
+    # Ensure we have OpenStack credentials
+    if [ -z "$OS_AUTH_URL" ]; then
+        if [ -f ~/admin-openrc ]; then
+            source ~/admin-openrc
+        else
+            echo "  ✗ ERROR: admin-openrc not found and OS_AUTH_URL not set!"
+            return 1
+        fi
+    fi
+    
+    # Verify openstack command is available
+    if ! command -v openstack &>/dev/null; then
+        echo "  ✗ ERROR: openstack command not found!"
+        return 1
+    fi
     
     # Create service if not exists
     if ! openstack service show "$SERVICE_NAME" &>/dev/null; then
