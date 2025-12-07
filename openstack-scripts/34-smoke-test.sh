@@ -228,9 +228,10 @@ fi
 
 echo ""
 echo "[2.6] Checking Cinder (Volume)..."
+# Note: Cinder returns HTTP 300 (Multiple Choices) at root - this is normal (version list)
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8776/" 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ]; then
-    pass "Cinder API responding (port 8776)"
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "300" ]; then
+    pass "Cinder API responding (port 8776, HTTP $HTTP_CODE)"
 else
     fail "Cinder API not responding (HTTP $HTTP_CODE)"
 fi
