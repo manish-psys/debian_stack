@@ -1,11 +1,11 @@
 #!/bin/bash
 ###############################################################################
-# 30-nova-ceph.sh
+# 31-nova-ceph.sh
 # Configure Nova to use Ceph for ephemeral disks
 ###############################################################################
 set -e
 
-echo "=== Step 30: Nova + Ceph Configuration ==="
+echo "=== Step 31: Nova + Ceph Configuration ==="
 
 echo "[1/3] Creating libvirt secret for Ceph..."
 

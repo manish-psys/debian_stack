@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# 28-cinder-db.sh
+# 29-cinder-db.sh
 # Create Cinder database and Keystone entities
 ###############################################################################
 set -e
@@ -10,7 +10,7 @@ CINDER_DB_PASS="cinderdbpass"    # Change this!
 CINDER_PASS="cinderpass"          # Keystone user password - Change this!
 IP_ADDRESS="192.168.2.9"
 
-echo "=== Step 28: Cinder Database and Keystone Setup ==="
+echo "=== Step 29: Cinder Database and Keystone Setup ==="
 
 echo "[1/3] Creating Cinder database..."
 echo "Enter MariaDB root password when prompted..."

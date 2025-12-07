@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# 31-horizon.sh
+# 32-horizon.sh
 # Install and configure Horizon (Dashboard)
 ###############################################################################
 set -e
@@ -9,7 +9,7 @@ set -e
 IP_ADDRESS="192.168.2.9"
 TIME_ZONE="UTC"    # Change to your timezone, e.g., "America/New_York"
 
-echo "=== Step 31: Horizon Installation ==="
+echo "=== Step 32: Horizon Installation ==="
 
 echo "[1/3] Installing Horizon..."
 sudo apt install -y openstack-dashboard

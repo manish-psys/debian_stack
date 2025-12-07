@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# 29-cinder-install.sh
+# 30-cinder-install.sh
 # Install and configure Cinder (Block Storage) with Ceph backend
 ###############################################################################
 set -e
@@ -11,7 +11,7 @@ CINDER_PASS="cinderpass"          # Must match 28-cinder-db.sh
 RABBIT_PASS="guest"
 IP_ADDRESS="192.168.2.9"
 
-echo "=== Step 29: Cinder Installation ==="
+echo "=== Step 30: Cinder Installation ==="
 
 echo "[1/5] Installing Cinder packages..."
 sudo apt -t bullseye-wallaby-backports install -y \

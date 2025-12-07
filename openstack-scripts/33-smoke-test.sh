@@ -1,11 +1,11 @@
 #!/bin/bash
 ###############################################################################
-# 32-smoke-test.sh
+# 33-smoke-test.sh
 # Final verification and test VM launch
 ###############################################################################
 set -e
 
-echo "=== Step 32: OpenStack Smoke Test ==="
+echo "=== Step 33: OpenStack Smoke Test ==="
 
 source ~/admin-openrc
 
