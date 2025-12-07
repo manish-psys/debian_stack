@@ -7,9 +7,9 @@
 # - Installs openstack-dashboard package
 # - Configures local_settings.py for Keystone v3
 # - Creates Apache virtual host configuration (Debian package doesn't include it!)
+# - Sets up writable static directory with proper permissions
+# - Regenerates compressed static files for /horizon WEBROOT
 # - Sets up memcached session backend
-# - Configures proper API versions and static file paths
-# - Enables all installed OpenStack services in dashboard
 #
 # Prerequisites:
 # - Keystone operational
@@ -19,8 +19,8 @@
 # Key Debian-specific issues addressed:
 # 1. Debian package does NOT include Apache config - we create it manually
 # 2. WEBROOT must be set to '/horizon/' since we mount at /horizon
-# 3. STATIC_ROOT/STATIC_URL must point to correct locations
-# 4. COMPRESS_OFFLINE must be True to use pre-compressed static files
+# 3. Static files need to be in a WRITABLE directory for compressor
+# 4. Must regenerate compressed files after setting WEBROOT
 ###############################################################################
 set -e
 
@@ -41,19 +41,19 @@ echo "=== Step 33: Horizon Dashboard Installation ==="
 HORIZON_CONF="/etc/openstack-dashboard/local_settings.py"
 TIME_ZONE="Asia/Kolkata"  # Change to your timezone
 
-# Apache/WSGI paths (determined from package inspection)
+# Apache/WSGI paths
 APACHE_SITE="/etc/apache2/sites-available/horizon.conf"
 WSGI_FILE="/usr/share/openstack-dashboard/wsgi.py"
 PYTHON_PATH="/usr/lib/python3/dist-packages"
 HORIZON_CONF_DIR="/etc/openstack-dashboard"
 
-# Static files location (Debian puts them here during package install)
-STATIC_ROOT="/usr/lib/python3/dist-packages/static"
+# Static files - use WRITABLE directory
+STATIC_ROOT="/var/lib/openstack-dashboard/static"
 
 ###############################################################################
-# [1/7] Prerequisites Check
+# [1/8] Prerequisites Check
 ###############################################################################
-echo "[1/7] Checking prerequisites..."
+echo "[1/8] Checking prerequisites..."
 
 # Check Keystone is accessible
 if ! curl -s "http://${CONTROLLER_IP}:5000/v3" | grep -q "version"; then
@@ -78,9 +78,9 @@ fi
 echo "  ✓ Apache2 running"
 
 ###############################################################################
-# [2/7] Install Horizon Package
+# [2/8] Install Horizon Package
 ###############################################################################
-echo "[2/7] Installing Horizon dashboard..."
+echo "[2/8] Installing Horizon dashboard..."
 
 if dpkg -l | grep -q "^ii.*openstack-dashboard "; then
     echo "  ✓ openstack-dashboard already installed"
@@ -100,17 +100,10 @@ if [ ! -f "$WSGI_FILE" ]; then
 fi
 echo "  ✓ WSGI file exists"
 
-# Verify static files exist
-if [ ! -d "$STATIC_ROOT/dashboard" ]; then
-    echo "  ✗ ERROR: Static files not found at $STATIC_ROOT"
-    exit 1
-fi
-echo "  ✓ Static files exist at $STATIC_ROOT"
-
 ###############################################################################
-# [3/7] Backup Original Configuration
+# [3/8] Backup Original Configuration
 ###############################################################################
-echo "[3/7] Backing up original configuration..."
+echo "[3/8] Backing up original configuration..."
 
 if [ -f "${HORIZON_CONF}.orig" ]; then
     echo "  ✓ Backup already exists"
@@ -120,9 +113,9 @@ else
 fi
 
 ###############################################################################
-# [4/7] Configure Horizon local_settings.py
+# [4/8] Configure Horizon local_settings.py
 ###############################################################################
-echo "[4/7] Configuring Horizon..."
+echo "[4/8] Configuring Horizon..."
 
 # Function to update Python settings file (idempotent)
 update_setting() {
@@ -159,7 +152,7 @@ sudo sed -i '/^# === CUSTOM OPENSTACK CONFIG ===/,/^# === END CUSTOM CONFIG ===/
 
 # Add comprehensive configuration block
 echo "  Adding custom configuration block..."
-cat <<'HORIZON_EOF' | sudo tee -a "$HORIZON_CONF" > /dev/null
+cat <<HORIZON_EOF | sudo tee -a "$HORIZON_CONF" > /dev/null
 
 # === CUSTOM OPENSTACK CONFIG ===
 # Added by 33-horizon-install.sh
@@ -176,15 +169,15 @@ LOGIN_REDIRECT_URL = '/horizon/'
 
 # =============================================================================
 # CRITICAL: Static Files Configuration
-# Debian installs static files to /usr/lib/python3/dist-packages/static/
-# We must tell Django where they are and use pre-compressed files
+# Static files MUST be in a writable directory for Django compressor
+# We use /var/lib/openstack-dashboard/static/ (writable by www-data)
 # =============================================================================
-STATIC_ROOT = '/usr/lib/python3/dist-packages/static'
+STATIC_ROOT = '${STATIC_ROOT}'
 STATIC_URL = '/horizon/static/'
 
-# Use pre-compressed static files (they exist from package install)
-# This prevents Django compressor from trying to write to read-only system dirs
-COMPRESS_OFFLINE = True
+# Disable offline compression - we'll compress on first request
+# This works because STATIC_ROOT is now writable
+COMPRESS_OFFLINE = False
 COMPRESS_ENABLED = True
 
 # =============================================================================
@@ -253,19 +246,41 @@ HORIZON_EOF
 echo "  ✓ local_settings.py configured"
 
 ###############################################################################
-# [5/7] Create Apache Virtual Host Configuration
+# [5/8] Setup Writable Static Directory
 ###############################################################################
-echo "[5/7] Creating Apache configuration..."
+echo "[5/8] Setting up writable static directory..."
 
-# NOTE: Debian's openstack-dashboard package does NOT include Apache config!
-# We must create it manually.
+# Create static directory if not exists
+sudo mkdir -p "${STATIC_ROOT}"
+
+# Copy static files from package location to writable location
+echo "  Copying static files (this may take a moment)..."
+if [ -d "/usr/lib/python3/dist-packages/static" ]; then
+    sudo cp -r /usr/lib/python3/dist-packages/static/* "${STATIC_ROOT}/" 2>/dev/null || true
+fi
+
+# Also collect from openstack_dashboard
+if [ -d "/usr/lib/python3/dist-packages/openstack_dashboard/static" ]; then
+    sudo cp -r /usr/lib/python3/dist-packages/openstack_dashboard/static/* "${STATIC_ROOT}/" 2>/dev/null || true
+fi
+
+# Set ownership to www-data so Django compressor can write
+sudo chown -R www-data:www-data "${STATIC_ROOT}"
+sudo chmod -R 755 "${STATIC_ROOT}"
+
+echo "  ✓ Static directory ready: ${STATIC_ROOT}"
+echo "  ✓ Ownership set to www-data"
+
+###############################################################################
+# [6/8] Create Apache Virtual Host Configuration
+###############################################################################
+echo "[6/8] Creating Apache configuration..."
 
 sudo tee "$APACHE_SITE" > /dev/null <<APACHE_EOF
 # OpenStack Horizon Dashboard Apache Configuration
 # Created by 33-horizon-install.sh
 #
 # Note: Debian's openstack-dashboard package does not include this file.
-# This was created manually based on OpenStack documentation.
 
 <VirtualHost *:80>
     ServerName ${CONTROLLER_IP}
@@ -288,8 +303,7 @@ sudo tee "$APACHE_SITE" > /dev/null <<APACHE_EOF
         </Files>
     </Directory>
     
-    # Static files (CSS, JS, images) - served directly by Apache
-    # These are in /usr/lib/python3/dist-packages/static/ on Debian
+    # Static files - served directly by Apache from WRITABLE directory
     Alias /horizon/static ${STATIC_ROOT}
     <Directory ${STATIC_ROOT}>
         Options FollowSymLinks
@@ -306,9 +320,9 @@ APACHE_EOF
 echo "  ✓ Created Apache config: $APACHE_SITE"
 
 ###############################################################################
-# [6/7] Enable Apache Modules and Site
+# [7/8] Enable Apache Modules and Site
 ###############################################################################
-echo "[6/7] Enabling Apache modules and Horizon site..."
+echo "[7/8] Enabling Apache modules and Horizon site..."
 
 # Enable required modules
 for mod in wsgi headers rewrite; do
@@ -337,9 +351,9 @@ else
 fi
 
 ###############################################################################
-# [7/7] Test and Restart Apache
+# [8/8] Test and Restart Apache
 ###############################################################################
-echo "[7/7] Testing and restarting Apache..."
+echo "[8/8] Testing and restarting Apache..."
 
 # Test Apache configuration syntax
 if sudo apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
@@ -368,12 +382,12 @@ fi
 echo ""
 echo "Verifying Horizon installation..."
 
-# Wait for WSGI to initialize
+# Wait for WSGI to initialize and first compression
+echo "  Waiting for initial page load (compressing static files)..."
 sleep 2
 
-# Test Horizon login page directly
-HORIZON_LOGIN="http://${CONTROLLER_IP}/horizon/auth/login/"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${HORIZON_LOGIN}" --max-time 10 2>/dev/null || echo "000")
+# First request will trigger compression - give it time
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}/horizon/auth/login/" --max-time 60 2>/dev/null || echo "000")
 
 if [ "$HTTP_CODE" = "200" ]; then
     echo "  ✓ Horizon login page accessible (HTTP 200)"
@@ -382,15 +396,7 @@ elif [ "$HTTP_CODE" = "500" ]; then
     echo "    View errors: sudo tail -30 /var/log/apache2/horizon_error.log"
 else
     echo "  ⚠ Horizon login returned HTTP ${HTTP_CODE}"
-    echo "    Check: sudo tail -30 /var/log/apache2/horizon_error.log"
-fi
-
-# Test static files
-STATIC_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}/horizon/static/dashboard/css/output.361cca58bb99.css" --max-time 5 2>/dev/null || echo "000")
-if [ "$STATIC_CODE" = "200" ]; then
-    echo "  ✓ Static files accessible (HTTP 200)"
-else
-    echo "  ⚠ Static files returned HTTP ${STATIC_CODE}"
+    echo "    First load may be slow due to compression. Try browser."
 fi
 
 # Verify Keystone is still accessible
@@ -416,7 +422,11 @@ echo ""
 echo "Configuration files:"
 echo "  Horizon config: ${HORIZON_CONF}"
 echo "  Apache config:  ${APACHE_SITE}"
+echo "  Static files:   ${STATIC_ROOT}"
 echo "  Horizon logs:   /var/log/apache2/horizon_error.log"
+echo ""
+echo "NOTE: First page load may be slow (30-60 seconds) as Django"
+echo "      compresses static files. Subsequent loads will be fast."
 echo ""
 echo "Available features:"
 echo "  ✓ Identity (Keystone) - Users, Projects, Roles"
@@ -432,7 +442,8 @@ echo ""
 echo "  # View Horizon error logs"
 echo "  sudo tail -f /var/log/apache2/horizon_error.log"
 echo ""
-echo "  # Test login page directly"
-echo "  curl -I http://${CONTROLLER_IP}/horizon/auth/login/"
+echo "  # If login fails, clear cache and restart"
+echo "  sudo rm -rf ${STATIC_ROOT}/CACHE"
+echo "  sudo systemctl restart apache2"
 echo ""
 echo "Next: Access the dashboard in your browser and login"

@@ -6,7 +6,7 @@
 # This script:
 # - Disables and removes Horizon Apache site
 # - Removes openstack-dashboard package
-# - Cleans up configuration files
+# - Cleans up configuration files and static directory
 # - Re-enables default Apache site
 #
 # NOTE: Uses safe removal to avoid cascade deletion
@@ -77,7 +77,7 @@ else
     echo "  ✓ Config directory already removed"
 fi
 
-# Remove cache/data
+# Remove static files and cache
 if [ -d /var/lib/openstack-dashboard ]; then
     sudo rm -rf /var/lib/openstack-dashboard
     echo "  ✓ Removed /var/lib/openstack-dashboard"
