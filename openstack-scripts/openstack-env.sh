@@ -1,8 +1,18 @@
 #!/bin/bash
 ###############################################################################
 # openstack-env.sh
-# Shared environment variables for OpenStack deployment
+# Shared environment variables for OpenStack deployment on Debian 13 (Trixie)
 # SOURCE THIS FILE IN ALL DEPLOYMENT SCRIPTS
+#
+# OpenStack Versions (Debian Trixie native packages):
+# - Keystone: 27.0.0 (2024.1 Caracal)
+# - Nova: 31.0.0 (2024.2 Dalmatian)
+# - Neutron: 26.0.0 (2024.1 Caracal)
+# - Glance: 28.0.0 (2024.1 Caracal)
+# - Cinder: 24.0.0 (2024.1 Caracal)
+# - Placement: 11.0.0 (2024.1 Caracal)
+# - Ceph: 18.2.7 (Reef LTS)
+# - OVS: 3.5.0 / OVN: 25.03.0
 ###############################################################################
 
 # =============================================================================

@@ -2,14 +2,24 @@
 ###############################################################################
 # 03-networking-bridge.sh
 # Configure Linux bridge for OpenStack provider network
+#
+# This creates br-provider bridge that will be used by:
+# - Host system for network connectivity
+# - OpenStack Neutron for provider network (direct VM connectivity)
+#
+# IMPORTANT: This will briefly disconnect your network!
 ###############################################################################
 set -e
 
-# Configuration - CORRECTED FOR YOUR SYSTEM
+# Source environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
+
+# Configuration
 PHYSICAL_NIC="eno1"        # Your actual NIC name
-IP_ADDRESS="192.168.2.9"
+IP_ADDRESS="${CONTROLLER_IP}"
 NETMASK="255.255.255.0"
-GATEWAY="192.168.2.1"
+GATEWAY="192.168.2.1"      # Adjust if your gateway is different
 
 echo "=== Step 3: Network Bridge Configuration ==="
 

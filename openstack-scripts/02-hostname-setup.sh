@@ -1,13 +1,20 @@
 #!/bin/bash
 ###############################################################################
 # 02-hostname-setup.sh
-# Configure hostname for OpenStack node
+# Configure hostname for OpenStack controller node
+#
+# This sets the system hostname and updates /etc/hosts for proper
+# name resolution required by OpenStack services.
 ###############################################################################
 set -e
 
-# Configuration - EDIT THESE
-HOSTNAME="osctl1"
-IP_ADDRESS="192.168.2.9"
+# Source environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
+
+# Configuration from environment
+HOSTNAME="${CONTROLLER_HOSTNAME}"
+IP_ADDRESS="${CONTROLLER_IP}"
 
 echo "=== Step 2: Hostname Setup ==="
 
