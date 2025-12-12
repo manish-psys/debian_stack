@@ -4,15 +4,38 @@
 # Shared environment variables for OpenStack deployment on Debian 13 (Trixie)
 # SOURCE THIS FILE IN ALL DEPLOYMENT SCRIPTS
 #
-# OpenStack Versions (Debian Trixie native packages):
-# - Keystone: 27.0.0 (2024.1 Caracal)
-# - Nova: 31.0.0 (2024.2 Dalmatian)
-# - Neutron: 26.0.0 (2024.1 Caracal)
-# - Glance: 28.0.0 (2024.1 Caracal)
-# - Cinder: 24.0.0 (2024.1 Caracal)
-# - Placement: 11.0.0 (2024.1 Caracal)
-# - Ceph: 18.2.7 (Reef LTS)
-# - OVS: 3.5.0 / OVN: 25.03.0
+# =============================================================================
+# DEPLOYED PACKAGE VERSIONS (Verified on 2025-12-12)
+# =============================================================================
+# These are the actual package versions available in Debian Trixie repositories
+# as verified by script 04-openstack-repos.sh
+#
+# OpenStack Components:
+# - Keystone: 2:27.0.0-3+deb13u1 (2024.1 Caracal with security updates)
+# - Nova: 2:31.0.0-6+deb13u1 (2024.2 Dalmatian with updates)
+# - Neutron: 2:26.0.0-9 (2024.1 Caracal)
+# - Glance: 2:30.0.0-3 (2024.2 Dalmatian)
+# - Cinder: 2:26.0.0-2 (2024.1 Caracal)
+# - Placement: (included with Nova)
+#
+# Storage & Networking:
+# - Ceph: 18.2.7+ds-1 (Reef LTS)
+# - Open vSwitch: 3.5.0-1+b1
+# - OVN Central: 25.03.0-1
+#
+# =============================================================================
+# DOCUMENTATION REFERENCES
+# =============================================================================
+# OpenStack Caracal (2024.1): https://docs.openstack.org/2024.1/
+# OpenStack Dalmatian (2024.2): https://docs.openstack.org/2024.2/
+# Ceph Reef: https://docs.ceph.com/en/reef/
+# OVN: https://www.ovn.org/en/
+# Debian OpenStack: https://wiki.debian.org/OpenStack
+#
+# Release Notes:
+# - Caracal: https://releases.openstack.org/caracal/
+# - Dalmatian: https://releases.openstack.org/dalmatian/
+# - Ceph Reef: https://docs.ceph.com/en/reef/releases/reef/
 ###############################################################################
 
 # =============================================================================
