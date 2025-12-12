@@ -1,15 +1,24 @@
 #!/bin/bash
 ###############################################################################
 # 08-ceph-mon-init.sh
-# Initialize Ceph monitor and manager (Fixed for Ceph Nautilus)
+# Initialize Ceph monitor for Ceph Reef
+#
+# This script creates the initial monitor (MON) which is the cluster
+# coordinator. The MON maintains the cluster map and handles authentication.
 ###############################################################################
 set -e
 
-# Configuration - EDIT THESE
-HOSTNAME="osctl1"
-IP_ADDRESS="192.168.2.9"
+# Source environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
+
+# Configuration from environment
+HOSTNAME="${CONTROLLER_HOSTNAME}"
+IP_ADDRESS="${CONTROLLER_IP}"
 
 echo "=== Step 8: Ceph Monitor Initialization ==="
+echo "Hostname: ${HOSTNAME}"
+echo "IP: ${IP_ADDRESS}"
 
 # Get FSID from ceph.conf
 FSID=$(awk '/fsid/ {print $3}' /etc/ceph/ceph.conf)
