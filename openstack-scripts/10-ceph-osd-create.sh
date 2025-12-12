@@ -1,16 +1,25 @@
 #!/bin/bash
 ###############################################################################
 # 10-ceph-osd-create.sh
-# Create Ceph OSDs on prepared disks (Improved & Idempotent)
+# Create Ceph OSDs on prepared disks for Ceph Reef
+#
+# This script creates Object Storage Daemons (OSDs) which are the actual
+# data storage components. Each disk becomes one OSD.
 ###############################################################################
 set -e
 
-# Configuration - EDIT THESE
+# Source environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
+
+# Configuration
 # Disk device names (without /dev/ prefix)
 OSD_DISKS="sdb sdc sdd sde"
-HOSTNAME="osctl1"
+HOSTNAME="${CONTROLLER_HOSTNAME}"
 
 echo "=== Step 10: Create Ceph OSDs ==="
+echo "Hostname: ${HOSTNAME}"
+echo "Disks: ${OSD_DISKS}"
 
 # ============================================================================
 # PART 1: Create bootstrap-osd keyring (if not exists)
