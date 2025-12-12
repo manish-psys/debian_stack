@@ -1,14 +1,23 @@
 #!/bin/bash
 ###############################################################################
 # 09-ceph-mon-mgr-start.sh
-# Start and enable Ceph monitor and manager services (Improved & Idempotent)
+# Start and enable Ceph monitor and manager services for Ceph Reef
+#
+# This script starts the MON (monitor) and MGR (manager) daemons which are
+# essential for cluster operation. MON maintains cluster state, MGR provides
+# monitoring and orchestration.
 ###############################################################################
 set -e
 
-# Configuration - EDIT THIS
-HOSTNAME="osctl1"
+# Source environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
+
+# Configuration from environment
+HOSTNAME="${CONTROLLER_HOSTNAME}"
 
 echo "=== Step 9: Start Ceph Monitor and Manager ==="
+echo "Hostname: ${HOSTNAME}"
 
 # ============================================================================
 # PART 1: Ceph Monitor
