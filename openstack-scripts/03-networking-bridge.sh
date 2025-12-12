@@ -23,14 +23,22 @@ GATEWAY="192.168.2.1"      # Adjust if your gateway is different
 
 echo "=== Step 3: Network Bridge Configuration ==="
 
-echo "[1/5] Removing any existing br-provider bridge..."
+echo "[1/6] Installing bridge-utils if needed..."
+if ! command -v brctl &>/dev/null; then
+    echo "  Installing bridge-utils..."
+    sudo apt install -y bridge-utils
+else
+    echo "  ✓ bridge-utils already installed"
+fi
+
+echo "[2/6] Removing any existing br-provider bridge..."
 sudo ip link set br-provider down 2>/dev/null || true
 sudo brctl delbr br-provider 2>/dev/null || true
 
-echo "[2/5] Backing up current network config..."
+echo "[3/6] Backing up current network config..."
 sudo cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
 
-echo "[3/5] Writing new network configuration..."
+echo "[4/6] Writing new network configuration..."
 cat <<EOF | sudo tee /etc/network/interfaces
 auto lo
 iface lo inet loopback
@@ -51,8 +59,11 @@ iface br-provider inet static
     bridge_maxwait 0
 EOF
 
-echo "[4/5] Applying network configuration..."
+echo "[5/6] Applying network configuration..."
 echo "WARNING: This may briefly disconnect your network!"
+echo "Current config: eno1 with DHCP (192.168.2.9)"
+echo "New config: br-provider with static IP (192.168.2.9)"
+echo ""
 read -p "Press Enter to continue or Ctrl+C to cancel..."
 
 # Bring down existing interface and flush IP
@@ -62,7 +73,7 @@ sudo ifdown ${PHYSICAL_NIC} 2>/dev/null || true
 # Bring up the bridge
 sudo ifup br-provider
 
-echo "[5/5] Verifying network..."
+echo "[6/6] Verifying network..."
 echo ""
 echo "Bridge status:"
 ip a show br-provider
