@@ -87,13 +87,13 @@ create_pool "${CEPH_NOVA_POOL}" 32 "Nova ephemeral"
 echo ""
 echo "[2/8] Creating RGW pools for S3 object storage..."
 
-# Create RGW pools
-create_pool ".rgw.root" 8 "RGW root"
-create_pool "default.rgw.control" 8 "RGW control"
-create_pool "default.rgw.meta" 8 "RGW metadata"
-create_pool "default.rgw.log" 8 "RGW logs"
-create_pool "default.rgw.buckets.index" 16 "RGW bucket index"
-create_pool "default.rgw.buckets.data" 64 "RGW bucket data"
+# Create RGW pools (Ceph Reef compatible names - no leading dots)
+create_pool "rgw-root" 8 "RGW root"
+create_pool "rgw-control" 8 "RGW control"
+create_pool "rgw-meta" 8 "RGW metadata"
+create_pool "rgw-log" 8 "RGW logs"
+create_pool "rgw-buckets-index" 16 "RGW bucket index"
+create_pool "rgw-buckets-data" 64 "RGW bucket data"
 
 echo ""
 echo "[3/8] Creating CephFS pools for shared filesystem..."
@@ -143,7 +143,7 @@ init_rbd_pool "${CEPH_NOVA_POOL}"
 echo ""
 echo "[5/8] Setting replication size to 1 (single-node cluster)..."
 
-ALL_POOLS="${CEPH_CINDER_POOL} ${CEPH_GLANCE_POOL} backups ${CEPH_NOVA_POOL} .rgw.root default.rgw.control default.rgw.meta default.rgw.log default.rgw.buckets.index default.rgw.buckets.data cephfs_metadata cephfs_data"
+ALL_POOLS="${CEPH_CINDER_POOL} ${CEPH_GLANCE_POOL} backups ${CEPH_NOVA_POOL} rgw-root rgw-control rgw-meta rgw-log rgw-buckets-index rgw-buckets-data cephfs_metadata cephfs_data"
 
 for p in ${ALL_POOLS}; do
     sudo ceph osd pool set $p size 1 &>/dev/null
