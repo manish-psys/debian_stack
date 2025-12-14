@@ -3,15 +3,23 @@
 # 15-keystone-install.sh
 # Install and configure Keystone (Identity service)
 # Robust, idempotent version with proper permissions handling
+#
+# This script:
+# - Sources openstack-env.sh for centralized configuration
+# - Installs Keystone from Debian Trixie native repositories
+# - Configures Keystone with Fernet tokens
+# - Bootstraps the admin user and endpoints
+# - Verifies the installation
 ###############################################################################
 set -e
 
-# Configuration - EDIT THESE
-KEYSTONE_DB_PASS="keystonepass123"    # Must match 14-keystone-db.sh
-ADMIN_PASS="keystonepass123"          # Admin user password
-IP_ADDRESS="192.168.2.9"
+# Source shared environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Step 15: Keystone Installation ==="
+echo "Controller: ${CONTROLLER_HOSTNAME} (${CONTROLLER_IP})"
+echo ""
 
 # ============================================================================
 # PART 0: Install prerequisites
@@ -38,7 +46,7 @@ dbc_remove=''
 dbc_dbtype='mysql'
 dbc_dbuser='keystone'
 dbc_dbpass='${KEYSTONE_DB_PASS}'
-dbc_dbserver='localhost'
+dbc_dbserver='${CONTROLLER_IP}'
 dbc_dbport=''
 dbc_dbname='keystone'
 dbc_dbadmin='root'
@@ -61,12 +69,18 @@ echo "  ✓ dbconfig-common configured to skip automatic setup"
 echo "[2/7] Installing Keystone packages..."
 export DEBIAN_FRONTEND=noninteractive
 
-sudo -E apt-get -t bullseye-wallaby-backports install -y \
+# Note: Debian Trixie has Keystone in main repositories, no backports needed
+# Package version: 2:27.0.0-3+deb13u1 (OpenStack 2024.1 Caracal)
+sudo -E apt-get install -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     keystone apache2 libapache2-mod-wsgi-py3
 
 echo "  ✓ Keystone packages installed"
+
+# Display installed version
+KEYSTONE_VERSION=$(dpkg -l keystone | grep "^ii" | awk '{print $3}')
+echo "  Installed version: keystone ${KEYSTONE_VERSION}"
 
 # ============================================================================
 # PART 3: Configure Keystone
@@ -80,7 +94,7 @@ fi
 
 # Update database connection
 sudo crudini --set /etc/keystone/keystone.conf database connection \
-    "mysql+pymysql://keystone:${KEYSTONE_DB_PASS}@localhost/keystone"
+    "mysql+pymysql://keystone:${KEYSTONE_DB_PASS}@${CONTROLLER_IP}/keystone"
 
 # Configure token provider
 sudo crudini --set /etc/keystone/keystone.conf token provider fernet
@@ -155,12 +169,12 @@ fi
 echo "[6/7] Bootstrapping Keystone..."
 
 sudo keystone-manage bootstrap --bootstrap-password "${ADMIN_PASS}" \
-    --bootstrap-admin-url "http://${IP_ADDRESS}:5000/v3/" \
-    --bootstrap-internal-url "http://${IP_ADDRESS}:5000/v3/" \
-    --bootstrap-public-url "http://${IP_ADDRESS}:5000/v3/" \
-    --bootstrap-region-id RegionOne
+    --bootstrap-admin-url "http://${CONTROLLER_IP}:5000/v3/" \
+    --bootstrap-internal-url "http://${CONTROLLER_IP}:5000/v3/" \
+    --bootstrap-public-url "http://${CONTROLLER_IP}:5000/v3/" \
+    --bootstrap-region-id "${REGION_NAME}"
 
-echo "  ✓ Keystone bootstrapped"
+echo "  ✓ Keystone bootstrapped with region: ${REGION_NAME}"
 
 # ============================================================================
 # PART 7: Configure Apache
@@ -168,7 +182,7 @@ echo "  ✓ Keystone bootstrapped"
 echo "[7/7] Configuring Apache..."
 
 # Set ServerName to avoid warning
-echo "ServerName ${IP_ADDRESS}" | sudo tee /etc/apache2/conf-available/servername.conf > /dev/null
+echo "ServerName ${CONTROLLER_IP}" | sudo tee /etc/apache2/conf-available/servername.conf > /dev/null
 sudo a2enconf servername 2>/dev/null || true
 
 # Enable keystone site if available
@@ -229,7 +243,7 @@ else
 fi
 
 # Test Keystone API
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${IP_ADDRESS}:5000/v3/" 2>/dev/null || echo "000")
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:5000/v3/" 2>/dev/null || echo "000")
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "300" ]; then
     echo "  ✓ Keystone API is responding (HTTP $HTTP_CODE)"
 else
@@ -238,17 +252,27 @@ fi
 
 echo ""
 if [ $ERRORS -eq 0 ]; then
-    echo "=== Keystone installed successfully ==="
+    echo "=========================================="
+    echo "=== ✓ Keystone installed successfully ==="
+    echo "=========================================="
+    echo ""
+    echo "Keystone Configuration:"
+    echo "  Version: ${KEYSTONE_VERSION}"
+    echo "  Region: ${REGION_NAME}"
+    echo "  API Endpoint: http://${CONTROLLER_IP}:5000/v3/"
+    echo "  Token Provider: Fernet"
+    echo ""
+    echo "Admin Credentials:"
+    echo "  Username: admin"
+    echo "  Password: ${ADMIN_PASS}"
+    echo "  Project: admin"
+    echo "  Domain: Default"
+    echo ""
+    echo "IMPORTANT: Save these credentials securely!"
+    echo ""
+    echo "Next: Run 16-keystone-openrc.sh to generate credential file"
 else
     echo "=== Keystone installation completed with $ERRORS error(s) ==="
     echo "Check logs: sudo journalctl -u apache2 -n 50"
+    exit 1
 fi
-
-echo ""
-echo "Admin credentials:"
-echo "  Username: admin"
-echo "  Password: ${ADMIN_PASS}"
-echo "  Auth URL: http://${IP_ADDRESS}:5000/v3/"
-echo ""
-echo "IMPORTANT: Save these credentials securely!"
-echo "Next: Run 16-keystone-openrc.sh"
