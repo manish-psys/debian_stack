@@ -2,30 +2,25 @@
 ###############################################################################
 # 17-glance-db.sh
 # Create Glance database and Keystone entities
+# Sources openstack-env.sh for centralized configuration
 ###############################################################################
 set -e
 
-# Configuration - EDIT THESE
-GLANCE_DB_PASS="glancepass123"    # Simple password (avoid special chars)
-GLANCE_PASS="glancepass123"       # Keystone user password
-IP_ADDRESS="192.168.2.9"
+# Source shared environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Step 17: Glance Database and Keystone Setup ==="
+echo "Controller: ${CONTROLLER_HOSTNAME} (${CONTROLLER_IP})"
+echo ""
 
 # ============================================================================
-# PART 1: Create Glance database
+# PART 1: Create Glance database (using helper function)
 # ============================================================================
 echo "[1/4] Creating Glance database..."
 
-# Use sudo to access mysql as root (no password prompt needed)
-sudo mysql <<EOF
-CREATE DATABASE IF NOT EXISTS glance;
-GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'localhost' IDENTIFIED BY '${GLANCE_DB_PASS}';
-GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'%' IDENTIFIED BY '${GLANCE_DB_PASS}';
-FLUSH PRIVILEGES;
-EOF
-
-echo "  ✓ Glance database created"
+# Use helper function from openstack-env.sh (idempotent)
+create_service_database "glance" "glance" "${GLANCE_DB_PASS}"
 
 # ============================================================================
 # PART 2: Load OpenStack credentials
@@ -71,29 +66,8 @@ else
     echo "  ✓ Glance service created"
 fi
 
-# Create endpoints (check if exists first)
-EXISTING_ENDPOINTS=$(openstack endpoint list --service glance -f value -c Interface 2>/dev/null || true)
-
-if echo "$EXISTING_ENDPOINTS" | grep -q "public"; then
-    echo "  ✓ Public endpoint already exists"
-else
-    openstack endpoint create --region RegionOne image public "http://${IP_ADDRESS}:9292"
-    echo "  ✓ Public endpoint created"
-fi
-
-if echo "$EXISTING_ENDPOINTS" | grep -q "internal"; then
-    echo "  ✓ Internal endpoint already exists"
-else
-    openstack endpoint create --region RegionOne image internal "http://${IP_ADDRESS}:9292"
-    echo "  ✓ Internal endpoint created"
-fi
-
-if echo "$EXISTING_ENDPOINTS" | grep -q "admin"; then
-    echo "  ✓ Admin endpoint already exists"
-else
-    openstack endpoint create --region RegionOne image admin "http://${IP_ADDRESS}:9292"
-    echo "  ✓ Admin endpoint created"
-fi
+# Create endpoints (using helper function from openstack-env.sh)
+create_service_endpoints "glance" "image" "OpenStack Image" "9292"
 
 # ============================================================================
 # Verification
