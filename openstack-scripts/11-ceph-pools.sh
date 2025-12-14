@@ -115,6 +115,40 @@ else
     fi
 fi
 
+# Initialize MDS (Metadata Server) for CephFS
+echo "  Initializing MDS daemon..."
+MDS_DIR="/var/lib/ceph/mds/ceph-${CONTROLLER_HOSTNAME}"
+MDS_KEYRING="${MDS_DIR}/keyring"
+
+# Create MDS directory if needed
+if [ ! -d "${MDS_DIR}" ]; then
+    sudo mkdir -p "${MDS_DIR}"
+    sudo chown ceph:ceph "${MDS_DIR}"
+    echo "  ✓ Created MDS directory"
+fi
+
+# Create MDS keyring if needed
+if [ ! -f "${MDS_KEYRING}" ]; then
+    sudo ceph auth get-or-create mds.${CONTROLLER_HOSTNAME} \
+        mon 'allow profile mds' \
+        osd 'allow rwx' \
+        mds 'allow *' \
+        -o "${MDS_KEYRING}"
+    sudo chown ceph:ceph "${MDS_KEYRING}"
+    sudo chmod 600 "${MDS_KEYRING}"
+    echo "  ✓ Created MDS keyring"
+else
+    echo "  ✓ MDS keyring already exists"
+fi
+
+# Start MDS service
+sudo systemctl enable ceph-mds@${CONTROLLER_HOSTNAME}
+sudo systemctl restart ceph-mds@${CONTROLLER_HOSTNAME}
+echo "  ✓ MDS service started"
+
+# Wait briefly for MDS to become active
+sleep 3
+
 echo ""
 echo "[4/8] Initializing RBD pools..."
 
@@ -267,11 +301,15 @@ fi
 
 # Verify CephFS
 if sudo ceph fs ls | grep -q "name: cephfs"; then
-    FS_STATUS=$(sudo ceph fs status cephfs 2>/dev/null | grep -oP '\d+(?= up)' || echo "0")
-    if [ "$FS_STATUS" -ge 1 ]; then
-        echo "  ✓ CephFS operational: $FS_STATUS MDS up"
+    echo "  ✓ CephFS filesystem exists"
+    # Check MDS status
+    if sudo ceph mds stat | grep -q "${CONTROLLER_HOSTNAME}:active"; then
+        echo "  ✓ MDS is active"
+    elif systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME}; then
+        echo "  ✓ MDS service running (may still be initializing)"
     else
-        echo "  ! CephFS created but MDS not fully up yet (may need time)"
+        echo "  ! MDS service not running properly"
+        ((ERRORS++))
     fi
 else
     echo "  ✗ ERROR: CephFS not found"

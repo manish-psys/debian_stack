@@ -39,11 +39,34 @@ if [ "$CONFIRM" != "DELETE" ]; then
 fi
 
 echo ""
-echo "[1/4] Removing CephFS filesystem..."
+echo "[1/5] Stopping and cleaning MDS..."
+# Stop MDS service
+if sudo systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
+    sudo systemctl stop ceph-mds@${CONTROLLER_HOSTNAME}
+    echo "  ✓ MDS service stopped"
+fi
+
+if sudo systemctl is-enabled --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
+    sudo systemctl disable ceph-mds@${CONTROLLER_HOSTNAME}
+    echo "  ✓ MDS service disabled"
+fi
+
+# Remove MDS keyring from Ceph
+if sudo ceph auth get mds.${CONTROLLER_HOSTNAME} >/dev/null 2>&1; then
+    sudo ceph auth del mds.${CONTROLLER_HOSTNAME}
+    echo "  ✓ MDS auth key removed"
+fi
+
+# Remove MDS data directory
+MDS_DIR="/var/lib/ceph/mds/ceph-${CONTROLLER_HOSTNAME}"
+if [ -d "${MDS_DIR}" ]; then
+    sudo rm -rf "${MDS_DIR}"
+    echo "  ✓ MDS directory removed"
+fi
+
+echo ""
+echo "[2/5] Removing CephFS filesystem..."
 if sudo ceph fs ls | grep -q "name: cephfs"; then
-    # Stop MDS first
-    sudo systemctl stop ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null || true
-    
     # Mark filesystem down
     sudo ceph fs fail cephfs 2>/dev/null || true
     
@@ -55,7 +78,7 @@ else
 fi
 
 echo ""
-echo "[2/4] Deleting client keyrings..."
+echo "[3/5] Deleting client keyrings..."
 for client in glance cinder nova rgw.${CONTROLLER_HOSTNAME}; do
     KEYRING="/etc/ceph/ceph.client.${client}.keyring"
     if [ -f "$KEYRING" ]; then
@@ -68,7 +91,7 @@ for client in glance cinder nova rgw.${CONTROLLER_HOSTNAME}; do
 done
 
 echo ""
-echo "[3/4] Deleting pools..."
+echo "[4/5] Deleting pools..."
 
 # Function to delete pool safely
 delete_pool() {
@@ -106,7 +129,7 @@ delete_pool "cephfs_metadata"
 delete_pool "cephfs_data"
 
 echo ""
-echo "[4/4] Verification..."
+echo "[5/5] Verification..."
 REMAINING_POOLS=$(sudo ceph osd pool ls | wc -l)
 echo "  Remaining pools: $REMAINING_POOLS"
 
