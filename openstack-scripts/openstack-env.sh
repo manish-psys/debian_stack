@@ -191,7 +191,7 @@ create_service_endpoints() {
     local EXISTING=$(/usr/bin/openstack endpoint list --service "$SERVICE_NAME" -f value -c Interface 2>/dev/null || true)
 
     for INTERFACE in public internal admin; do
-        if ! echo "$EXISTING" | grep -q "$INTERFACE"; then
+        if ! echo "$EXISTING" | /usr/bin/grep -q "$INTERFACE"; then
             /usr/bin/openstack endpoint create --region "$REGION_NAME" "$SERVICE_TYPE" "$INTERFACE" "$BASE_URL"
             echo "  ✓ $INTERFACE endpoint created"
         else
