@@ -182,15 +182,38 @@ init_rbd_pool "${CEPH_NOVA_POOL}"
 echo ""
 echo "[5/8] Setting replication size to 1 (single-node cluster)..."
 
+# Enable size=1 for single-node clusters (Ceph Reef requirement)
+echo "  Enabling mon_allow_pool_size_one..."
+if sudo ceph config get mon mon_allow_pool_size_one 2>/dev/null | grep -q "false"; then
+    sudo ceph config set global mon_allow_pool_size_one true
+    echo "  ✓ Enabled mon_allow_pool_size_one"
+elif sudo ceph config get mon mon_allow_pool_size_one 2>/dev/null | grep -q "true"; then
+    echo "  ✓ mon_allow_pool_size_one already enabled"
+else
+    # Not set, enable it
+    sudo ceph config set global mon_allow_pool_size_one true
+    echo "  ✓ Enabled mon_allow_pool_size_one"
+fi
+
 ALL_POOLS="${CEPH_CINDER_POOL} ${CEPH_GLANCE_POOL} backups ${CEPH_NOVA_POOL} rgw-root rgw-control rgw-meta rgw-log rgw-buckets-index rgw-buckets-data cephfs_metadata cephfs_data"
 
 for p in ${ALL_POOLS}; do
-    sudo ceph osd pool set $p size 1 &>/dev/null
-    sudo ceph osd pool set $p min_size 1 &>/dev/null
+    # Set size without hiding errors
+    if sudo ceph osd pool set $p size 1 2>&1 | grep -q "Error"; then
+        echo "  ✗ ERROR: Failed to set size=1 for $p"
+        ((ERRORS++))
+        continue
+    fi
+    
+    if sudo ceph osd pool set $p min_size 1 2>&1 | grep -q "Error"; then
+        echo "  ✗ ERROR: Failed to set min_size=1 for $p"
+        ((ERRORS++))
+        continue
+    fi
     
     # Verify settings
-    SIZE=$(sudo ceph osd pool get $p size | awk '{print $2}')
-    MIN_SIZE=$(sudo ceph osd pool get $p min_size | awk '{print $2}')
+    SIZE=$(sudo ceph osd pool get $p size 2>/dev/null | awk '{print $2}')
+    MIN_SIZE=$(sudo ceph osd pool get $p min_size 2>/dev/null | awk '{print $2}')
     
     if [ "$SIZE" = "1" ] && [ "$MIN_SIZE" = "1" ]; then
         echo "  ✓ $p: size=1, min_size=1"
