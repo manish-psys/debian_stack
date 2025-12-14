@@ -136,18 +136,23 @@ if [ ! -f "${MDS_KEYRING}" ]; then
         -o "${MDS_KEYRING}"
     sudo chown ceph:ceph "${MDS_KEYRING}"
     sudo chmod 600 "${MDS_KEYRING}"
+    sync  # Ensure keyring is written to disk
+    sleep 2  # Allow time for filesystem sync
     echo "  ✓ Created MDS keyring"
 else
     echo "  ✓ MDS keyring already exists"
 fi
+
+# Reset any failed state before starting
+sudo systemctl reset-failed ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null || true
 
 # Start MDS service
 sudo systemctl enable ceph-mds@${CONTROLLER_HOSTNAME}
 sudo systemctl restart ceph-mds@${CONTROLLER_HOSTNAME}
 echo "  ✓ MDS service started"
 
-# Wait briefly for MDS to become active
-sleep 3
+# Wait for MDS to become active
+sleep 5
 
 echo ""
 echo "[4/8] Initializing RBD pools..."
