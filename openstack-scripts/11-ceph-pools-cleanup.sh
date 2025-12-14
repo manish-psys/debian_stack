@@ -1,12 +1,16 @@
 #!/bin/bash
 ###############################################################################
-# 11-ceph-pools-cleanup.sh
+# 11-ceph-pools-cleanup.sh (IMPROVED)
 # Cleanup script to remove all Ceph pools created by 11-ceph-pools.sh
 #
-# WARNING: This will DESTROY all data in the pools!
-# Use this only when you need to start fresh.
+# FIXES APPLIED:
+# 1. Proper wait for MDS to stop before removing filesystem
+# 2. Force fail CephFS before deletion
+# 3. Better error handling without set -e
 ###############################################################################
-set -e
+
+# Don't use set -e - handle errors explicitly
+set +e
 
 # Source environment
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,20 +44,30 @@ fi
 
 echo ""
 echo "[1/5] Stopping and cleaning MDS..."
-# Stop MDS service
-if sudo systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
+
+# Stop MDS service first
+if systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
     sudo systemctl stop ceph-mds@${CONTROLLER_HOSTNAME}
+    # Wait for MDS to fully stop
+    for i in {1..10}; do
+        if ! systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME}; then
+            break
+        fi
+        sleep 1
+    done
     echo "  ✓ MDS service stopped"
+else
+    echo "  ✓ MDS service not running"
 fi
 
-if sudo systemctl is-enabled --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
-    sudo systemctl disable ceph-mds@${CONTROLLER_HOSTNAME}
+if systemctl is-enabled --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
+    sudo systemctl disable ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null
     echo "  ✓ MDS service disabled"
 fi
 
-# Remove MDS keyring from Ceph
-if sudo ceph auth get mds.${CONTROLLER_HOSTNAME} >/dev/null 2>&1; then
-    sudo ceph auth del mds.${CONTROLLER_HOSTNAME}
+# Remove MDS keyring from Ceph auth
+if sudo ceph auth get mds.${CONTROLLER_HOSTNAME} &>/dev/null; then
+    sudo ceph auth del mds.${CONTROLLER_HOSTNAME} 2>/dev/null
     echo "  ✓ MDS auth key removed"
 fi
 
@@ -66,51 +80,75 @@ fi
 
 echo ""
 echo "[2/5] Removing CephFS filesystem..."
-if sudo ceph fs ls | grep -q "name: cephfs"; then
-    # Mark filesystem down
+
+if sudo ceph fs ls 2>/dev/null | grep -q "name: cephfs"; then
+    # FIX: Properly fail and remove CephFS
+    echo "  Marking CephFS as failed..."
     sudo ceph fs fail cephfs 2>/dev/null || true
+    sleep 2
     
-    # Remove filesystem
-    sudo ceph fs rm cephfs --yes-i-really-mean-it 2>/dev/null || true
-    echo "  ✓ CephFS filesystem removed"
+    echo "  Removing CephFS filesystem..."
+    sudo ceph fs rm cephfs --yes-i-really-mean-it 2>/dev/null
+    
+    if ! sudo ceph fs ls 2>/dev/null | grep -q "name: cephfs"; then
+        echo "  ✓ CephFS filesystem removed"
+    else
+        echo "  ✗ Failed to remove CephFS (may need manual intervention)"
+    fi
 else
-    echo "  ✓ CephFS filesystem not found"
+    echo "  ✓ CephFS filesystem not found (already removed)"
 fi
 
 echo ""
 echo "[3/5] Deleting client keyrings..."
-for client in glance cinder nova rgw.${CONTROLLER_HOSTNAME}; do
-    KEYRING="/etc/ceph/ceph.client.${client}.keyring"
-    if [ -f "$KEYRING" ]; then
-        sudo ceph auth del client.${client} 2>/dev/null || true
-        sudo rm -f "$KEYRING"
-        echo "  ✓ client.${client} removed"
-    else
-        echo "  ✓ client.${client} not found"
+
+delete_client() {
+    local CLIENT=$1
+    local KEYRING="/etc/ceph/ceph.client.${CLIENT}.keyring"
+    
+    # Remove from Ceph auth
+    if sudo ceph auth get client.${CLIENT} &>/dev/null; then
+        sudo ceph auth del client.${CLIENT} 2>/dev/null
     fi
-done
+    
+    # Remove keyring file
+    if [ -f "$KEYRING" ]; then
+        sudo rm -f "$KEYRING"
+        echo "  ✓ client.${CLIENT} removed"
+    else
+        echo "  ✓ client.${CLIENT} not found"
+    fi
+}
+
+delete_client "glance"
+delete_client "cinder"
+delete_client "nova"
+delete_client "rgw.${CONTROLLER_HOSTNAME}"
 
 echo ""
 echo "[4/5] Deleting pools..."
 
-# Function to delete pool safely
+# Enable pool deletion
+sudo ceph config set mon mon_allow_pool_delete true 2>/dev/null
+# Also use the old method for compatibility
+sudo ceph tell mon.\* injectargs '--mon-allow-pool-delete=true' 2>/dev/null || true
+sleep 2
+
 delete_pool() {
     local POOL_NAME=$1
     
-    if sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
-        # Allow pool deletion
-        sudo ceph tell mon.\* injectargs '--mon-allow-pool-delete=true' 2>/dev/null || true
-        
-        # Delete pool
-        sudo ceph osd pool delete ${POOL_NAME} ${POOL_NAME} --yes-i-really-really-mean-it 2>/dev/null
-        
-        if sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
-            echo "  ✗ Failed to delete ${POOL_NAME}"
-        else
-            echo "  ✓ ${POOL_NAME} deleted"
-        fi
-    else
+    if ! sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
         echo "  ✓ ${POOL_NAME} not found"
+        return 0
+    fi
+    
+    OUTPUT=$(sudo ceph osd pool delete "${POOL_NAME}" "${POOL_NAME}" --yes-i-really-really-mean-it 2>&1)
+    RC=$?
+    
+    if [ $RC -eq 0 ] && ! sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
+        echo "  ✓ ${POOL_NAME} deleted"
+    else
+        echo "  ✗ Failed to delete ${POOL_NAME}: $OUTPUT"
     fi
 }
 
@@ -130,11 +168,19 @@ delete_pool "cephfs_data"
 
 echo ""
 echo "[5/5] Verification..."
-REMAINING_POOLS=$(sudo ceph osd pool ls | wc -l)
+
+REMAINING_POOLS=$(sudo ceph osd pool ls 2>/dev/null | wc -l)
 echo "  Remaining pools: $REMAINING_POOLS"
 
-REMAINING_KEYRINGS=$(ls /etc/ceph/ceph.client.*.keyring 2>/dev/null | wc -l)
-echo "  Remaining keyrings: $REMAINING_KEYRINGS"
+REMAINING_KEYRINGS=$(ls /etc/ceph/ceph.client.*.keyring 2>/dev/null | grep -v admin | wc -l)
+echo "  Remaining client keyrings (excluding admin): $REMAINING_KEYRINGS"
+
+# Show what's left
+if [ "$REMAINING_POOLS" -gt 0 ]; then
+    echo ""
+    echo "  Remaining pools:"
+    sudo ceph osd pool ls | sed 's/^/    /'
+fi
 
 echo ""
 echo "=== Cleanup complete ==="

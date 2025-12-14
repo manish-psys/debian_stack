@@ -1,16 +1,19 @@
 #!/bin/bash
 ###############################################################################
-# 11-ceph-pools.sh
+# 11-ceph-pools.sh (IMPROVED)
 # Create Ceph pools for ALL OpenStack storage features with full validation
 #
-# This script creates storage pools for:
-# 1. Block Storage (Cinder) - Volumes, snapshots, backups
-# 2. VM Images (Glance) - OS images, snapshots
-# 3. Ephemeral Storage (Nova) - Temporary VM disks
-# 4. S3 Object Storage (RGW) - Bucket storage via S3 API
-# 5. Shared Filesystem (CephFS) - Multi-VM file sharing
+# FIXES APPLIED:
+# 1. Config propagation delay - wait after setting mon_allow_pool_size_one
+# 2. Proper error detection without relying on grep for "Error" string
+# 3. Better set -e handling with explicit error trapping
+# 4. MDS race condition fix with sync and proper wait
+# 5. Idempotent pool size setting (skip if already correct)
+# 6. CephFS pools need 'cephfs' application, not 'rbd'
 ###############################################################################
-set -e
+
+# Don't use set -e globally - handle errors explicitly
+set +e
 
 # Source environment
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +21,17 @@ source "${SCRIPT_DIR}/openstack-env.sh"
 
 # Error counter
 ERRORS=0
+
+# Colors for output (optional, works without them)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log_success() { echo -e "  ${GREEN}✓${NC} $1"; }
+log_error() { echo -e "  ${RED}✗${NC} ERROR: $1"; ((ERRORS++)); }
+log_warn() { echo -e "  ${YELLOW}!${NC} $1"; }
+log_info() { echo "  $1"; }
 
 echo "=== Step 11: Create Ceph Pools for Complete OpenStack Storage ==="
 echo "Using pool names from environment:"
@@ -34,27 +48,52 @@ echo "[0/8] Checking prerequisites..."
 
 # Check Ceph cluster is healthy enough
 if ! sudo ceph health &>/dev/null; then
-    echo "  ✗ ERROR: Cannot connect to Ceph cluster!"
+    log_error "Cannot connect to Ceph cluster!"
     exit 1
 fi
-echo "  ✓ Ceph cluster accessible"
+log_success "Ceph cluster accessible"
 
 # Check OSDs are up
-OSD_COUNT=$(sudo ceph osd stat | grep -oP '\d+(?= osds:)' || echo "0")
-OSD_UP=$(sudo ceph osd stat | grep -oP '\d+(?= up)' || echo "0")
+OSD_STAT=$(sudo ceph osd stat 2>/dev/null)
+OSD_COUNT=$(echo "$OSD_STAT" | grep -oP '\d+(?= osds:)' || echo "0")
+OSD_UP=$(echo "$OSD_STAT" | grep -oP '\d+(?= up)' || echo "0")
 if [ "$OSD_UP" -lt 1 ]; then
-    echo "  ✗ ERROR: No OSDs are up! ($OSD_UP/$OSD_COUNT)"
+    log_error "No OSDs are up! ($OSD_UP/$OSD_COUNT)"
     exit 1
 fi
-echo "  ✓ OSDs operational: $OSD_UP/$OSD_COUNT up"
+log_success "OSDs operational: $OSD_UP/$OSD_COUNT up"
 
-# Check MDS daemon is available for CephFS
-if ! systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null; then
-    echo "  ! MDS not running, will start it for CephFS"
-    sudo systemctl enable ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null || true
-    sudo systemctl start ceph-mds@${CONTROLLER_HOSTNAME} || echo "  ! MDS start failed, will retry"
+# ============================================================================
+# PART 0.5: Enable single-replica pools BEFORE creating pools
+# ============================================================================
+echo ""
+echo "[0.5/8] Configuring single-node cluster settings..."
+
+# FIX #1: Set mon_allow_pool_size_one BEFORE pool creation and WAIT for propagation
+CURRENT_SETTING=$(sudo ceph config get mon mon_allow_pool_size_one 2>/dev/null | tr -d '[:space:]')
+if [ "$CURRENT_SETTING" != "true" ]; then
+    log_info "Enabling mon_allow_pool_size_one..."
+    sudo ceph config set global mon_allow_pool_size_one true
+    
+    # FIX #2: Wait for config to propagate to all monitors
+    log_info "Waiting for config propagation (5 seconds)..."
+    sleep 5
+    
+    # Verify it took effect
+    NEW_SETTING=$(sudo ceph config get mon mon_allow_pool_size_one 2>/dev/null | tr -d '[:space:]')
+    if [ "$NEW_SETTING" = "true" ]; then
+        log_success "mon_allow_pool_size_one enabled"
+    else
+        log_error "Failed to enable mon_allow_pool_size_one (current: $NEW_SETTING)"
+        exit 1
+    fi
+else
+    log_success "mon_allow_pool_size_one already enabled"
 fi
 
+# ============================================================================
+# PART 1: Create RBD Pools
+# ============================================================================
 echo ""
 echo "[1/8] Creating RBD pools for OpenStack block storage..."
 
@@ -65,16 +104,26 @@ create_pool() {
     local DESCRIPTION=$3
     
     if sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
-        echo "  ✓ ${POOL_NAME} already exists"
+        log_success "${POOL_NAME} already exists"
+        return 0
+    fi
+    
+    local OUTPUT
+    OUTPUT=$(sudo ceph osd pool create "${POOL_NAME}" "${PG_NUM}" 2>&1)
+    local RC=$?
+    
+    if [ $RC -ne 0 ]; then
+        log_error "Failed to create ${POOL_NAME}: $OUTPUT"
+        return 1
+    fi
+    
+    # Verify pool was created
+    if sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
+        log_success "${POOL_NAME} created (${DESCRIPTION})"
+        return 0
     else
-        sudo ceph osd pool create ${POOL_NAME} ${PG_NUM}
-        # Verify pool was created
-        if sudo ceph osd pool ls | grep -q "^${POOL_NAME}$"; then
-            echo "  ✓ ${POOL_NAME} created (${DESCRIPTION})"
-        else
-            echo "  ✗ ERROR: Failed to create ${POOL_NAME}"
-            ((ERRORS++))
-        fi
+        log_error "Pool ${POOL_NAME} not found after creation"
+        return 1
     fi
 }
 
@@ -84,10 +133,12 @@ create_pool "${CEPH_GLANCE_POOL}" 64 "Glance images"
 create_pool "backups" 32 "Cinder backups"
 create_pool "${CEPH_NOVA_POOL}" 32 "Nova ephemeral"
 
+# ============================================================================
+# PART 2: Create RGW Pools
+# ============================================================================
 echo ""
 echo "[2/8] Creating RGW pools for S3 object storage..."
 
-# Create RGW pools (Ceph Reef compatible names - no leading dots)
 create_pool "rgw-root" 8 "RGW root"
 create_pool "rgw-control" 8 "RGW control"
 create_pool "rgw-meta" 8 "RGW metadata"
@@ -95,28 +146,35 @@ create_pool "rgw-log" 8 "RGW logs"
 create_pool "rgw-buckets-index" 16 "RGW bucket index"
 create_pool "rgw-buckets-data" 64 "RGW bucket data"
 
+# ============================================================================
+# PART 3: Create CephFS Pools and Filesystem
+# ============================================================================
 echo ""
 echo "[3/8] Creating CephFS pools for shared filesystem..."
 
-# Create CephFS pools
 create_pool "cephfs_metadata" 32 "CephFS metadata"
 create_pool "cephfs_data" 64 "CephFS data"
 
 # Create CephFS filesystem if not exists
-if sudo ceph fs ls | grep -q "name: cephfs"; then
-    echo "  ✓ CephFS filesystem 'cephfs' already exists"
+if sudo ceph fs ls 2>/dev/null | grep -q "name: cephfs"; then
+    log_success "CephFS filesystem 'cephfs' already exists"
 else
-    sudo ceph fs new cephfs cephfs_metadata cephfs_data
-    if sudo ceph fs ls | grep -q "name: cephfs"; then
-        echo "  ✓ CephFS filesystem 'cephfs' created"
+    log_info "Creating CephFS filesystem..."
+    OUTPUT=$(sudo ceph fs new cephfs cephfs_metadata cephfs_data 2>&1)
+    RC=$?
+    
+    if [ $RC -ne 0 ]; then
+        log_error "Failed to create CephFS: $OUTPUT"
+    elif sudo ceph fs ls | grep -q "name: cephfs"; then
+        log_success "CephFS filesystem 'cephfs' created"
     else
-        echo "  ✗ ERROR: Failed to create CephFS filesystem"
-        ((ERRORS++))
+        log_error "CephFS filesystem not found after creation"
     fi
 fi
 
 # Initialize MDS (Metadata Server) for CephFS
-echo "  Initializing MDS daemon..."
+echo ""
+log_info "Initializing MDS daemon..."
 MDS_DIR="/var/lib/ceph/mds/ceph-${CONTROLLER_HOSTNAME}"
 MDS_KEYRING="${MDS_DIR}/keyring"
 
@@ -124,7 +182,9 @@ MDS_KEYRING="${MDS_DIR}/keyring"
 if [ ! -d "${MDS_DIR}" ]; then
     sudo mkdir -p "${MDS_DIR}"
     sudo chown ceph:ceph "${MDS_DIR}"
-    echo "  ✓ Created MDS directory"
+    log_success "Created MDS directory"
+else
+    log_success "MDS directory exists"
 fi
 
 # Create MDS keyring if needed
@@ -133,45 +193,69 @@ if [ ! -f "${MDS_KEYRING}" ]; then
         mon 'allow profile mds' \
         osd 'allow rwx' \
         mds 'allow *' \
-        -o "${MDS_KEYRING}"
+        -o "${MDS_KEYRING}" 2>/dev/null
     sudo chown ceph:ceph "${MDS_KEYRING}"
     sudo chmod 600 "${MDS_KEYRING}"
-    sync  # Ensure keyring is written to disk
-    sleep 2  # Allow time for filesystem sync
-    echo "  ✓ Created MDS keyring"
+    
+    # FIX #3: Ensure keyring is persisted before starting service
+    sync
+    sleep 2
+    
+    log_success "Created MDS keyring"
 else
-    echo "  ✓ MDS keyring already exists"
+    log_success "MDS keyring already exists"
 fi
 
-# Reset any failed state before starting
+# Reset any failed state and start MDS service
 sudo systemctl reset-failed ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null || true
-
-# Start MDS service
-sudo systemctl enable ceph-mds@${CONTROLLER_HOSTNAME}
+sudo systemctl enable ceph-mds@${CONTROLLER_HOSTNAME} 2>/dev/null
 sudo systemctl restart ceph-mds@${CONTROLLER_HOSTNAME}
-echo "  ✓ MDS service started"
 
-# Wait for MDS to become active
-sleep 5
+# FIX #4: Wait for MDS to become active with timeout
+log_info "Waiting for MDS to become active..."
+MDS_READY=false
+for i in {1..12}; do
+    sleep 2
+    if sudo ceph mds stat 2>/dev/null | grep -q "up:active"; then
+        MDS_READY=true
+        break
+    fi
+done
 
+if [ "$MDS_READY" = true ]; then
+    log_success "MDS is active"
+else
+    if systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME}; then
+        log_warn "MDS service running but not yet active (may need more time)"
+    else
+        log_error "MDS service failed to start"
+    fi
+fi
+
+# ============================================================================
+# PART 4: Initialize RBD Pools
+# ============================================================================
 echo ""
 echo "[4/8] Initializing RBD pools..."
 
-# Function to initialize RBD pool with verification
 init_rbd_pool() {
     local POOL_NAME=$1
     
-    if sudo rbd pool stats ${POOL_NAME} &>/dev/null; then
-        echo "  ✓ ${POOL_NAME} already initialized for RBD"
-    else
-        sudo rbd pool init ${POOL_NAME}
-        if sudo rbd pool stats ${POOL_NAME} &>/dev/null; then
-            echo "  ✓ ${POOL_NAME} initialized for RBD"
-        else
-            echo "  ✗ ERROR: Failed to initialize ${POOL_NAME} for RBD"
-            ((ERRORS++))
-        fi
+    if sudo rbd pool stats "${POOL_NAME}" &>/dev/null; then
+        log_success "${POOL_NAME} already initialized for RBD"
+        return 0
     fi
+    
+    OUTPUT=$(sudo rbd pool init "${POOL_NAME}" 2>&1)
+    RC=$?
+    
+    if [ $RC -ne 0 ]; then
+        log_error "Failed to initialize ${POOL_NAME} for RBD: $OUTPUT"
+        return 1
+    fi
+    
+    log_success "${POOL_NAME} initialized for RBD"
+    return 0
 }
 
 init_rbd_pool "${CEPH_CINDER_POOL}"
@@ -179,80 +263,114 @@ init_rbd_pool "${CEPH_GLANCE_POOL}"
 init_rbd_pool "backups"
 init_rbd_pool "${CEPH_NOVA_POOL}"
 
+# ============================================================================
+# PART 5: Set Replication Size (with proper error handling)
+# ============================================================================
 echo ""
 echo "[5/8] Setting replication size to 1 (single-node cluster)..."
 
-# Enable size=1 for single-node clusters (Ceph Reef requirement)
-echo "  Enabling mon_allow_pool_size_one..."
-if sudo ceph config get mon mon_allow_pool_size_one 2>/dev/null | grep -q "false"; then
-    sudo ceph config set global mon_allow_pool_size_one true
-    echo "  ✓ Enabled mon_allow_pool_size_one"
-elif sudo ceph config get mon mon_allow_pool_size_one 2>/dev/null | grep -q "true"; then
-    echo "  ✓ mon_allow_pool_size_one already enabled"
-else
-    # Not set, enable it
-    sudo ceph config set global mon_allow_pool_size_one true
-    echo "  ✓ Enabled mon_allow_pool_size_one"
-fi
-
-ALL_POOLS="${CEPH_CINDER_POOL} ${CEPH_GLANCE_POOL} backups ${CEPH_NOVA_POOL} rgw-root rgw-control rgw-meta rgw-log rgw-buckets-index rgw-buckets-data cephfs_metadata cephfs_data"
-
-for p in ${ALL_POOLS}; do
-    # Set size without hiding errors
-    if sudo ceph osd pool set $p size 1 2>&1 | grep -q "Error"; then
-        echo "  ✗ ERROR: Failed to set size=1 for $p"
-        ((ERRORS++))
-        continue
-    fi
-    
-    if sudo ceph osd pool set $p min_size 1 2>&1 | grep -q "Error"; then
-        echo "  ✗ ERROR: Failed to set min_size=1 for $p"
-        ((ERRORS++))
-        continue
-    fi
-    
-    # Verify settings
-    SIZE=$(sudo ceph osd pool get $p size 2>/dev/null | awk '{print $2}')
-    MIN_SIZE=$(sudo ceph osd pool get $p min_size 2>/dev/null | awk '{print $2}')
-    
-    if [ "$SIZE" = "1" ] && [ "$MIN_SIZE" = "1" ]; then
-        echo "  ✓ $p: size=1, min_size=1"
-    else
-        echo "  ✗ ERROR: $p: size=$SIZE, min_size=$MIN_SIZE (expected 1,1)"
-        ((ERRORS++))
-    fi
-done
-
-echo ""
-echo "[6/8] Enabling RBD application on block storage pools..."
-
-# Function to enable RBD application with verification
-enable_rbd_app() {
+# FIX #5: Function that properly checks return code AND current value
+set_pool_size() {
     local POOL_NAME=$1
     
-    # Check if already enabled
-    if sudo ceph osd pool application get ${POOL_NAME} rbd &>/dev/null; then
-        echo "  ✓ ${POOL_NAME}: RBD application already enabled"
+    # Check current size first - skip if already correct (idempotent)
+    local CURRENT_SIZE=$(sudo ceph osd pool get "$POOL_NAME" size 2>/dev/null | awk '{print $2}')
+    local CURRENT_MIN=$(sudo ceph osd pool get "$POOL_NAME" min_size 2>/dev/null | awk '{print $2}')
+    
+    if [ "$CURRENT_SIZE" = "1" ] && [ "$CURRENT_MIN" = "1" ]; then
+        log_success "$POOL_NAME: size=1, min_size=1 (already set)"
+        return 0
+    fi
+    
+    # Set size
+    local OUTPUT
+    OUTPUT=$(sudo ceph osd pool set "$POOL_NAME" size 1 2>&1)
+    local RC=$?
+    if [ $RC -ne 0 ]; then
+        log_error "Failed to set size=1 for $POOL_NAME: $OUTPUT"
+        return 1
+    fi
+    
+    # Set min_size
+    OUTPUT=$(sudo ceph osd pool set "$POOL_NAME" min_size 1 2>&1)
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        log_error "Failed to set min_size=1 for $POOL_NAME: $OUTPUT"
+        return 1
+    fi
+    
+    # Verify
+    local SIZE=$(sudo ceph osd pool get "$POOL_NAME" size 2>/dev/null | awk '{print $2}')
+    local MIN_SIZE=$(sudo ceph osd pool get "$POOL_NAME" min_size 2>/dev/null | awk '{print $2}')
+    
+    if [ "$SIZE" = "1" ] && [ "$MIN_SIZE" = "1" ]; then
+        log_success "$POOL_NAME: size=1, min_size=1"
+        return 0
     else
-        sudo ceph osd pool application enable ${POOL_NAME} rbd
-        if sudo ceph osd pool application get ${POOL_NAME} rbd &>/dev/null; then
-            echo "  ✓ ${POOL_NAME}: RBD application enabled"
-        else
-            echo "  ✗ ERROR: Failed to enable RBD on ${POOL_NAME}"
-            ((ERRORS++))
-        fi
+        log_error "$POOL_NAME: size=$SIZE, min_size=$MIN_SIZE (expected 1,1)"
+        return 1
     fi
 }
 
-enable_rbd_app "${CEPH_CINDER_POOL}"
-enable_rbd_app "${CEPH_GLANCE_POOL}"
-enable_rbd_app "backups"
-enable_rbd_app "${CEPH_NOVA_POOL}"
+# Apply to all pools
+ALL_POOLS="${CEPH_CINDER_POOL} ${CEPH_GLANCE_POOL} backups ${CEPH_NOVA_POOL} rgw-root rgw-control rgw-meta rgw-log rgw-buckets-index rgw-buckets-data cephfs_metadata cephfs_data"
 
+for p in ${ALL_POOLS}; do
+    set_pool_size "$p"
+done
+
+# ============================================================================
+# PART 6: Enable Applications on Pools
+# ============================================================================
+echo ""
+echo "[6/8] Enabling applications on pools..."
+
+enable_pool_app() {
+    local POOL_NAME=$1
+    local APP_NAME=$2
+    
+    # Check if already enabled
+    if sudo ceph osd pool application get "${POOL_NAME}" "${APP_NAME}" &>/dev/null; then
+        log_success "${POOL_NAME}: ${APP_NAME} application already enabled"
+        return 0
+    fi
+    
+    OUTPUT=$(sudo ceph osd pool application enable "${POOL_NAME}" "${APP_NAME}" 2>&1)
+    RC=$?
+    
+    if [ $RC -ne 0 ]; then
+        log_error "Failed to enable ${APP_NAME} on ${POOL_NAME}: $OUTPUT"
+        return 1
+    fi
+    
+    log_success "${POOL_NAME}: ${APP_NAME} application enabled"
+    return 0
+}
+
+# RBD pools
+enable_pool_app "${CEPH_CINDER_POOL}" "rbd"
+enable_pool_app "${CEPH_GLANCE_POOL}" "rbd"
+enable_pool_app "backups" "rbd"
+enable_pool_app "${CEPH_NOVA_POOL}" "rbd"
+
+# RGW pools
+enable_pool_app "rgw-root" "rgw"
+enable_pool_app "rgw-control" "rgw"
+enable_pool_app "rgw-meta" "rgw"
+enable_pool_app "rgw-log" "rgw"
+enable_pool_app "rgw-buckets-index" "rgw"
+enable_pool_app "rgw-buckets-data" "rgw"
+
+# FIX #6: CephFS pools need 'cephfs' application, not 'rbd'
+enable_pool_app "cephfs_metadata" "cephfs"
+enable_pool_app "cephfs_data" "cephfs"
+
+# ============================================================================
+# PART 7: Create Client Keyrings
+# ============================================================================
 echo ""
 echo "[7/8] Creating Ceph client keyrings for OpenStack..."
 
-# Function to create client keyring with verification
 create_client() {
     local CLIENT_NAME=$1
     local MON_CAPS=$2
@@ -261,28 +379,23 @@ create_client() {
     local DESCRIPTION=$5
     
     if [ -f "${KEYRING_FILE}" ]; then
-        echo "  ✓ ${CLIENT_NAME} keyring already exists"
+        log_success "${CLIENT_NAME} keyring already exists"
+        return 0
+    fi
+    
+    sudo ceph auth get-or-create ${CLIENT_NAME} \
+        mon "${MON_CAPS}" \
+        osd "${OSD_CAPS}" \
+        2>/dev/null | sudo tee ${KEYRING_FILE} > /dev/null
+    
+    sudo chmod 600 ${KEYRING_FILE}
+    
+    if [ -f "${KEYRING_FILE}" ] && [ -s "${KEYRING_FILE}" ]; then
+        log_success "${CLIENT_NAME} keyring created (${DESCRIPTION})"
+        return 0
     else
-        sudo ceph auth get-or-create ${CLIENT_NAME} \
-            mon "${MON_CAPS}" \
-            osd "${OSD_CAPS}" \
-            | sudo tee ${KEYRING_FILE} > /dev/null
-        
-        sudo chmod 600 ${KEYRING_FILE}
-        
-        # Verify keyring was created and has correct permissions
-        if [ -f "${KEYRING_FILE}" ]; then
-            PERMS=$(stat -c %a ${KEYRING_FILE})
-            if [ "$PERMS" = "600" ]; then
-                echo "  ✓ ${CLIENT_NAME} keyring created (${DESCRIPTION})"
-            else
-                echo "  ✗ ERROR: ${CLIENT_NAME} keyring has wrong permissions: $PERMS"
-                ((ERRORS++))
-            fi
-        else
-            echo "  ✗ ERROR: Failed to create ${CLIENT_NAME} keyring"
-            ((ERRORS++))
-        fi
+        log_error "Failed to create ${CLIENT_NAME} keyring"
+        return 1
     fi
 }
 
@@ -314,84 +427,78 @@ create_client "client.rgw.${CONTROLLER_HOSTNAME}" \
     "/etc/ceph/ceph.client.rgw.${CONTROLLER_HOSTNAME}.keyring" \
     "S3 API"
 
+# ============================================================================
+# PART 8: Final Verification
+# ============================================================================
 echo ""
 echo "[8/8] Final verification..."
 
 # Count pools
-EXPECTED_POOLS=13
+EXPECTED_POOLS=12
 ACTUAL_POOLS=$(sudo ceph osd pool ls | wc -l)
 if [ "$ACTUAL_POOLS" -ge "$EXPECTED_POOLS" ]; then
-    echo "  ✓ Pool count: $ACTUAL_POOLS (expected >= $EXPECTED_POOLS)"
+    log_success "Pool count: $ACTUAL_POOLS (expected >= $EXPECTED_POOLS)"
 else
-    echo "  ✗ ERROR: Pool count: $ACTUAL_POOLS (expected >= $EXPECTED_POOLS)"
-    ((ERRORS++))
+    log_error "Pool count: $ACTUAL_POOLS (expected >= $EXPECTED_POOLS)"
 fi
 
 # Verify CephFS
 if sudo ceph fs ls | grep -q "name: cephfs"; then
-    echo "  ✓ CephFS filesystem exists"
-    # Check MDS status
-    if sudo ceph mds stat | grep -q "${CONTROLLER_HOSTNAME}:active"; then
-        echo "  ✓ MDS is active"
+    log_success "CephFS filesystem exists"
+    if sudo ceph mds stat | grep -q "up:active"; then
+        log_success "MDS is active"
     elif systemctl is-active --quiet ceph-mds@${CONTROLLER_HOSTNAME}; then
-        echo "  ✓ MDS service running (may still be initializing)"
+        log_warn "MDS service running (may still be initializing)"
     else
-        echo "  ! MDS service not running properly"
-        ((ERRORS++))
+        log_error "MDS service not running properly"
     fi
 else
-    echo "  ✗ ERROR: CephFS not found"
-    ((ERRORS++))
+    log_error "CephFS not found"
 fi
 
 # Verify keyrings
 EXPECTED_KEYRINGS=4
-ACTUAL_KEYRINGS=$(ls /etc/ceph/ceph.client.*.keyring 2>/dev/null | wc -l)
+ACTUAL_KEYRINGS=$(ls /etc/ceph/ceph.client.glance.keyring /etc/ceph/ceph.client.cinder.keyring /etc/ceph/ceph.client.nova.keyring /etc/ceph/ceph.client.rgw.*.keyring 2>/dev/null | wc -l)
 if [ "$ACTUAL_KEYRINGS" -ge "$EXPECTED_KEYRINGS" ]; then
-    echo "  ✓ Client keyrings: $ACTUAL_KEYRINGS (expected >= $EXPECTED_KEYRINGS)"
+    log_success "Client keyrings: $ACTUAL_KEYRINGS (expected >= $EXPECTED_KEYRINGS)"
 else
-    echo "  ✗ ERROR: Client keyrings: $ACTUAL_KEYRINGS (expected >= $EXPECTED_KEYRINGS)"
-    ((ERRORS++))
+    log_error "Client keyrings: $ACTUAL_KEYRINGS (expected >= $EXPECTED_KEYRINGS)"
 fi
 
 # Test RBD functionality
-echo "  Testing RBD functionality..."
+log_info "Testing RBD functionality..."
 TEST_IMAGE="test-image-$$"
-if sudo rbd create ${CEPH_CINDER_POOL}/${TEST_IMAGE} --size 1M &>/dev/null; then
+if sudo rbd create ${CEPH_CINDER_POOL}/${TEST_IMAGE} --size 1M 2>/dev/null; then
     if sudo rbd ls ${CEPH_CINDER_POOL} | grep -q "${TEST_IMAGE}"; then
         sudo rbd rm ${CEPH_CINDER_POOL}/${TEST_IMAGE} &>/dev/null
-        echo "  ✓ RBD create/delete test passed"
+        log_success "RBD create/delete test passed"
     else
-        echo "  ✗ ERROR: RBD image not found after creation"
-        ((ERRORS++))
+        log_error "RBD image not found after creation"
     fi
 else
-    echo "  ✗ ERROR: RBD image creation failed"
-    ((ERRORS++))
+    log_error "RBD image creation failed"
 fi
 
+# ============================================================================
+# Summary
+# ============================================================================
 echo ""
 echo "=== Detailed Status ==="
 echo ""
-echo "Pool list:"
-sudo ceph osd pool ls detail
+echo "Pool list with applications:"
+sudo ceph osd pool ls detail | grep -E "^pool|application"
 
 echo ""
 echo "CephFS status:"
 sudo ceph fs ls
-sudo ceph fs status cephfs 2>/dev/null || echo "  (CephFS status not available yet)"
 
 echo ""
 echo "MDS status:"
 sudo ceph mds stat
 
 echo ""
-echo "Client authentication:"
-sudo ceph auth ls | grep -A 3 "client\." | head -20
-
-echo ""
-echo "Created keyrings:"
-ls -lh /etc/ceph/ceph.client.*.keyring
+echo "Client keyrings:"
+ls -lh /etc/ceph/ceph.client.*.keyring 2>/dev/null
 
 echo ""
 if [ $ERRORS -eq 0 ]; then
@@ -408,39 +515,9 @@ else
 fi
 
 echo ""
-echo "✓ BLOCK STORAGE (Cinder + RBD):"
-echo "  - Primary volumes: ${CEPH_CINDER_POOL}"
-echo "  - Volume backups: backups"
-echo "  - Volume snapshots: Enabled"
-echo "  - Volume clones: Enabled"
-echo ""
-echo "✓ VM IMAGES (Glance + RBD):"
-echo "  - Image storage: ${CEPH_GLANCE_POOL}"
-echo "  - Image snapshots: Enabled"
-echo "  - Boot from volume: Supported"
-echo ""
-echo "✓ EPHEMERAL STORAGE (Nova + RBD):"
-echo "  - Ephemeral disks: ${CEPH_NOVA_POOL}"
-echo ""
-echo "✓ S3 OBJECT STORAGE (RGW):"
-echo "  - Pools ready: 6 RGW pools created"
-echo "  - Client: client.rgw.${CONTROLLER_HOSTNAME}"
-echo "  - Note: Requires radosgw service configuration"
-echo ""
-echo "✓ SHARED FILESYSTEM (CephFS):"
-echo "  - Filesystem: cephfs"
-echo "  - Pools: cephfs_metadata, cephfs_data"
-echo "  - Note: Requires Manila service for managed shares"
-echo ""
-echo "Customer Features Available:"
-echo "  ✓ Create/delete/resize volumes"
-echo "  ✓ Volume snapshots and restore"
-echo "  ✓ Volume backups and restore"
-echo "  ✓ Clone volumes (instant)"
-echo "  ✓ Upload/download VM images"
-echo "  ✓ Create VMs from images"
-echo "  ✓ Create VMs from volumes"
-echo "  ✓ S3 bucket operations (after RGW setup)"
-echo "  ✓ Shared filesystem across VMs (after Manila setup)"
+echo "Storage Summary:"
+echo "  ✓ Block Storage (RBD): ${CEPH_CINDER_POOL}, ${CEPH_GLANCE_POOL}, backups, ${CEPH_NOVA_POOL}"
+echo "  ✓ Object Storage (RGW): 6 pools ready (requires radosgw service)"
+echo "  ✓ Filesystem (CephFS): cephfs (requires Manila for managed shares)"
 echo ""
 echo "Next: Run 12-openstack-base.sh"
