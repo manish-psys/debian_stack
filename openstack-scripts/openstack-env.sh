@@ -55,7 +55,7 @@ export REGION_NAME="RegionOne"
 # DATABASE PASSWORDS
 # Use simple passwords without special characters to avoid URL encoding issues
 # =============================================================================
-export MYSQL_ROOT_PASS=""  # Set during mysql_secure_installation (script 13)
+export MYSQL_ROOT_PASS=""  # Debian uses unix_socket auth, no password needed for root
 
 # Service database passwords
 export KEYSTONE_DB_PASS="keystonepass123"
@@ -83,6 +83,17 @@ export RABBIT_USER="openstack"
 export RABBIT_PASS="rabbitpass123"
 
 # =============================================================================
+# MEMCACHED CONFIGURATION
+# =============================================================================
+# Memcached listens on controller IP to allow multi-node access
+export MEMCACHED_SERVERS="${CONTROLLER_IP}:11211"
+
+# =============================================================================
+# ETCD CONFIGURATION
+# =============================================================================
+export ETCD_SERVERS="http://${CONTROLLER_IP}:2379"
+
+# =============================================================================
 # METADATA / NEUTRON SHARED SECRET
 # =============================================================================
 export METADATA_SECRET="metadatasecret123"
@@ -90,7 +101,8 @@ export METADATA_SECRET="metadatasecret123"
 # =============================================================================
 # OVN CONFIGURATION
 # =============================================================================
-export OVN_NB_DB="unix:/var/run/ovn/ovnsb_db.sock"
+# FIX: OVN_NB_DB was incorrectly pointing to ovnsb_db.sock (copy-paste error)
+export OVN_NB_DB="unix:/var/run/ovn/ovnnb_db.sock"
 export OVN_SB_DB="unix:/var/run/ovn/ovnsb_db.sock"
 export PROVIDER_NETWORK_NAME="physnet1"
 export PROVIDER_BRIDGE_NAME="br-provider"
@@ -124,7 +136,8 @@ configure_keystone_authtoken() {
     
     sudo crudini --set "$CONFIG_FILE" keystone_authtoken www_authenticate_uri "$KEYSTONE_AUTH_URL"
     sudo crudini --set "$CONFIG_FILE" keystone_authtoken auth_url "$KEYSTONE_AUTH_URL"
-    sudo crudini --set "$CONFIG_FILE" keystone_authtoken memcached_servers "localhost:11211"
+    # FIX: Use MEMCACHED_SERVERS variable instead of hardcoded localhost
+    sudo crudini --set "$CONFIG_FILE" keystone_authtoken memcached_servers "$MEMCACHED_SERVERS"
     sudo crudini --set "$CONFIG_FILE" keystone_authtoken auth_type "password"
     sudo crudini --set "$CONFIG_FILE" keystone_authtoken project_domain_name "Default"
     sudo crudini --set "$CONFIG_FILE" keystone_authtoken user_domain_name "Default"
@@ -183,6 +196,28 @@ create_service_endpoints() {
             echo "  ✓ $INTERFACE endpoint already exists"
         fi
     done
+}
+
+# =============================================================================
+# HELPER FUNCTION: Create database and user for OpenStack service
+# Usage: create_service_database <db_name> <db_user> <db_pass>
+# =============================================================================
+create_service_database() {
+    local DB_NAME="$1"
+    local DB_USER="$2"
+    local DB_PASS="$3"
+    
+    # Create database if not exists
+    sudo mysql -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME};"
+    
+    # Create user and grant privileges (idempotent)
+    sudo mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+    sudo mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}';"
+    sudo mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';"
+    sudo mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'%';"
+    sudo mysql -e "FLUSH PRIVILEGES;"
+    
+    echo "  ✓ Database '${DB_NAME}' and user '${DB_USER}' configured"
 }
 
 # =============================================================================
