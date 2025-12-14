@@ -170,27 +170,29 @@ create_service_endpoints() {
             return 1
         fi
     fi
-    
-    # Verify openstack command is available
-    if ! command -v openstack &>/dev/null; then
-        echo "  ✗ ERROR: openstack command not found!"
+
+    # Verify openstack command works by testing it (more robust than command -v)
+    # Use full path to avoid PATH issues in different shell contexts
+    if ! /usr/bin/openstack --version &>/dev/null; then
+        echo "  ✗ ERROR: openstack command not available or not working!"
+        echo "  Debug: Ensure python3-openstackclient is installed"
         return 1
     fi
     
     # Create service if not exists
-    if ! openstack service show "$SERVICE_NAME" &>/dev/null; then
-        openstack service create --name "$SERVICE_NAME" --description "$DESCRIPTION" "$SERVICE_TYPE"
+    if ! /usr/bin/openstack service show "$SERVICE_NAME" &>/dev/null; then
+        /usr/bin/openstack service create --name "$SERVICE_NAME" --description "$DESCRIPTION" "$SERVICE_TYPE"
         echo "  ✓ Service '$SERVICE_NAME' created"
     else
         echo "  ✓ Service '$SERVICE_NAME' already exists"
     fi
-    
+
     # Create endpoints if not exist
-    local EXISTING=$(openstack endpoint list --service "$SERVICE_NAME" -f value -c Interface 2>/dev/null || true)
-    
+    local EXISTING=$(/usr/bin/openstack endpoint list --service "$SERVICE_NAME" -f value -c Interface 2>/dev/null || true)
+
     for INTERFACE in public internal admin; do
         if ! echo "$EXISTING" | grep -q "$INTERFACE"; then
-            openstack endpoint create --region "$REGION_NAME" "$SERVICE_TYPE" "$INTERFACE" "$BASE_URL"
+            /usr/bin/openstack endpoint create --region "$REGION_NAME" "$SERVICE_TYPE" "$INTERFACE" "$BASE_URL"
             echo "  ✓ $INTERFACE endpoint created"
         else
             echo "  ✓ $INTERFACE endpoint already exists"
