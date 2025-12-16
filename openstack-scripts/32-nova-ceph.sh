@@ -134,9 +134,47 @@ else
 fi
 
 ###############################################################################
-# [4/6] Configure Nova for Ceph
+# [4/7] Configure AppArmor for Ceph Keyring Access
 ###############################################################################
-echo "[4/6] Configuring Nova [libvirt] section..."
+echo "[4/7] Configuring AppArmor for Ceph keyring access..."
+
+# LESSON LEARNED: AppArmor blocks libvirt/QEMU from accessing Ceph keyrings
+# Add local override to allow Ceph keyring access
+if [ -d /etc/apparmor.d/local ]; then
+    cat <<EOF | sudo tee /etc/apparmor.d/local/abstractions/libvirt-qemu > /dev/null
+# Allow Ceph keyring access for OpenStack Nova
+/etc/ceph/** r,
+/etc/ceph/ceph.client.*.keyring r,
+EOF
+    echo "  ✓ AppArmor local override created"
+
+    # Reload AppArmor if running
+    if systemctl is-active --quiet apparmor; then
+        sudo systemctl reload apparmor
+        echo "  ✓ AppArmor reloaded"
+    fi
+else
+    echo "  ⚠ AppArmor local directory not found (may not be installed)"
+fi
+
+###############################################################################
+# [5/7] Add libvirt-qemu User to Cinder Group
+###############################################################################
+echo "[5/7] Adding libvirt-qemu to cinder group..."
+
+# LESSON LEARNED: libvirt-qemu user needs read access to Ceph keyrings
+# Keyrings are owned by ceph:cinder with mode 640
+if getent group cinder &>/dev/null; then
+    sudo usermod -aG cinder libvirt-qemu 2>/dev/null || true
+    echo "  ✓ libvirt-qemu added to cinder group"
+else
+    echo "  ⚠ cinder group not found - will be created when Cinder is installed"
+fi
+
+###############################################################################
+# [6/7] Configure Nova for Ceph
+###############################################################################
+echo "[6/7] Configuring Nova [libvirt] section..."
 
 # Backup current config
 sudo cp "$NOVA_CONF" "${NOVA_CONF}.pre-ceph.$(date +%Y%m%d_%H%M%S)"
@@ -166,18 +204,19 @@ echo "    rbd_user: $(sudo crudini --get "$NOVA_CONF" libvirt rbd_user)"
 echo "    rbd_secret_uuid: $(sudo crudini --get "$NOVA_CONF" libvirt rbd_secret_uuid)"
 
 ###############################################################################
-# [5/6] Update Cinder Secret UUID
+# [7/7] Update Cinder Secret UUID
 ###############################################################################
-echo "[5/6] Updating Cinder with consistent secret UUID..."
+echo "[7/7] Updating Cinder with consistent secret UUID..."
 
 # Ensure Cinder uses same secret UUID
 sudo crudini --set "$CINDER_CONF" ceph rbd_secret_uuid "${SECRET_UUID}"
 echo "  ✓ Cinder [ceph] rbd_secret_uuid updated"
 
 ###############################################################################
-# [6/6] Restart Services
+# Restart Services
 ###############################################################################
-echo "[6/6] Restarting services..."
+echo ""
+echo "Restarting services..."
 
 # Restart Nova compute
 sudo systemctl restart nova-compute

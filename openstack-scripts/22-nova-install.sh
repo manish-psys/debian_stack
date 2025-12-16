@@ -262,6 +262,17 @@ sudo crudini --set /etc/nova/nova.conf placement username "placement"
 sudo crudini --set /etc/nova/nova.conf placement password "${PLACEMENT_PASS}"
 echo "  ✓ [placement] section configured"
 
+# --- [cinder] section (for volume operations) ---
+# LESSON LEARNED: Nova needs explicit cinder config to find volume service
+sudo crudini --set /etc/nova/nova.conf cinder os_region_name "${REGION_NAME}"
+sudo crudini --set /etc/nova/nova.conf cinder catalog_info "volumev3:cinderv3:publicURL"
+echo "  ✓ [cinder] section configured"
+
+# --- [oslo_messaging_rabbit] section ---
+# LESSON LEARNED: OpenStack Caracal requires quorum queues (classic HA deprecated)
+sudo crudini --set /etc/nova/nova.conf oslo_messaging_rabbit rabbit_quorum_queue "true"
+echo "  ✓ [oslo_messaging_rabbit] section configured (quorum queues enabled)"
+
 # --- [libvirt] section (for nova-compute) ---
 # Detect virtualization support
 if /usr/bin/grep -qE '(vmx|svm)' /proc/cpuinfo; then
