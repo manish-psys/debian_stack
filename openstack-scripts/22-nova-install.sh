@@ -269,9 +269,12 @@ sudo crudini --set /etc/nova/nova.conf cinder catalog_info "volumev3:cinderv3:pu
 echo "  ✓ [cinder] section configured"
 
 # --- [oslo_messaging_rabbit] section ---
-# LESSON LEARNED: OpenStack Caracal requires quorum queues (classic HA deprecated)
-sudo crudini --set /etc/nova/nova.conf oslo_messaging_rabbit rabbit_quorum_queue "true"
-echo "  ✓ [oslo_messaging_rabbit] section configured (quorum queues enabled)"
+# NOTE: Quorum queues (rabbit_quorum_queue=true) require a RabbitMQ cluster with
+# 3+ nodes for Raft consensus. For single-node deployments, do NOT enable quorum
+# queues - they will cause services to fail with "State: down" and zombie workers.
+# Only enable for HA deployments with a proper RabbitMQ cluster.
+# For single-node: use standard queues (no special configuration needed)
+echo "  ✓ [oslo_messaging_rabbit] section configured (standard queues for single-node)"
 
 # --- [libvirt] section (for nova-compute) ---
 # Detect virtualization support

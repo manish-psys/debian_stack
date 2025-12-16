@@ -465,10 +465,19 @@ fi
 ## New Considerations for Trixie
 
 ### RabbitMQ Quorum Queues
-OpenStack Caracal ONLY supports quorum queues (classic HA queues deprecated):
+OpenStack Caracal deprecates classic HA (mirrored) queues in favor of quorum queues.
+**IMPORTANT**: This applies ONLY to HA deployments with a RabbitMQ cluster (3+ nodes).
+
+For **single-node deployments**: Do NOT enable quorum queues. They require Raft
+consensus across multiple RabbitMQ nodes. Enabling on single-node causes services
+to fail with "State: down", "Updated At: None", and zombie worker processes.
+
 ```ini
+# For HA deployments with RabbitMQ cluster ONLY:
 [oslo_messaging_rabbit]
 rabbit_quorum_queue = true
+
+# For single-node deployments: leave unset (use standard queues)
 ```
 
 ### Ceph Reef (18.x) Changes
