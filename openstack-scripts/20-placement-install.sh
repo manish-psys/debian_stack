@@ -4,42 +4,37 @@
 # Install and configure Placement service
 # Idempotent - safe to run multiple times
 #
-# Key fixes:
+# For Debian 13 (Trixie) with native OpenStack packages
+# Placement version: placement-api (OpenStack 2024.1 Caracal)
+#
+# Key notes:
 # - Debian placement-api uses uwsgi (not Apache mod_wsgi)
 # - Stop service before config, sync DB, then restart
 # - Verify database tables exist after sync
 ###############################################################################
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# =============================================================================
 # Source shared environment
-# =============================================================================
-if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
-    source "${SCRIPT_DIR}/openstack-env.sh"
-else
-    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
-    echo "Please ensure openstack-env.sh is in the same directory as this script."
-    exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Step 20: Placement Installation ==="
-echo "Using Region: ${REGION_NAME}"
-echo "Using Controller: ${CONTROLLER_IP}"
+echo "Controller: ${CONTROLLER_HOSTNAME} (${CONTROLLER_IP})"
+echo ""
 
 # ============================================================================
 # PART 0: Check prerequisites
 # ============================================================================
 echo "[0/7] Checking prerequisites..."
 
-if ! command -v crudini &> /dev/null; then
-    sudo apt install -y crudini
+# Check crudini using absolute path (avoid PATH issues in different contexts)
+if [ ! -x /usr/bin/crudini ]; then
+    sudo apt-get install -y crudini
 fi
 echo "  ✓ crudini available"
 
 # Check database is ready
-if sudo mysql -e "SELECT 1 FROM mysql.user WHERE User='placement'" 2>/dev/null | grep -q 1; then
+if sudo mysql -e "SELECT 1 FROM mysql.user WHERE User='placement'" 2>/dev/null | /usr/bin/grep -q 1; then
     echo "  ✓ Placement database user exists"
 else
     echo "  ✗ ERROR: Placement database not ready. Run 19-placement-db.sh first!"
@@ -48,7 +43,7 @@ fi
 
 # Check Keystone service exists
 source ~/admin-openrc
-if openstack service show placement &>/dev/null; then
+if /usr/bin/openstack service show placement &>/dev/null; then
     echo "  ✓ Placement service registered in Keystone"
 else
     echo "  ✗ ERROR: Placement service not in Keystone. Run 19-placement-db.sh first!"
@@ -68,7 +63,7 @@ dbc_remove=''
 dbc_dbtype='mysql'
 dbc_dbuser='placement'
 dbc_dbpass='${PLACEMENT_DB_PASS}'
-dbc_dbserver='localhost'
+dbc_dbserver='${CONTROLLER_IP}'
 dbc_dbname='placement'
 EOF
 
@@ -82,12 +77,19 @@ echo "  ✓ dbconfig-common configured"
 echo "[2/7] Installing Placement..."
 
 export DEBIAN_FRONTEND=noninteractive
-sudo -E apt-get -t bullseye-wallaby-backports install -y \
+
+# Debian Trixie has Placement in main repositories - no backports needed
+# Package: placement-api (OpenStack 2024.1 Caracal)
+sudo -E apt-get install -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     placement-api
 
 echo "  ✓ Placement packages installed"
+
+# Display installed version
+PLACEMENT_VERSION=$(dpkg -l placement-api | grep "^ii" | awk '{print $3}')
+echo "  Installed version: placement-api ${PLACEMENT_VERSION}"
 
 # ============================================================================
 # PART 3: Stop placement-api service before configuration
@@ -115,8 +117,9 @@ if [ -f /etc/placement/placement.conf ] && [ ! -f /etc/placement/placement.conf.
 fi
 
 # Database connection - NOTE: section is 'placement_database' for Placement
+# Use CONTROLLER_IP for consistency
 sudo crudini --set /etc/placement/placement.conf placement_database connection \
-    "mysql+pymysql://placement:${PLACEMENT_DB_PASS}@localhost/placement"
+    "mysql+pymysql://placement:${PLACEMENT_DB_PASS}@${CONTROLLER_IP}/placement"
 
 # API auth strategy
 sudo crudini --set /etc/placement/placement.conf api auth_strategy "keystone"
@@ -260,17 +263,17 @@ fi
 
 # Test Placement API via OpenStack CLI
 source ~/admin-openrc
-if openstack --os-placement-api-version 1.2 resource class list &>/dev/null; then
+if /usr/bin/openstack --os-placement-api-version 1.2 resource class list &>/dev/null; then
     echo "  ✓ Placement API responding to OpenStack CLI"
-    
+
     # Count resource classes
-    RC_COUNT=$(openstack --os-placement-api-version 1.2 resource class list -f value | wc -l)
+    RC_COUNT=$(/usr/bin/openstack --os-placement-api-version 1.2 resource class list -f value | wc -l)
     echo "  ✓ Resource classes available: ${RC_COUNT}"
-    
+
     # Show sample
     echo ""
     echo "Sample resource classes:"
-    openstack --os-placement-api-version 1.2 resource class list --sort-column name | head -10
+    /usr/bin/openstack --os-placement-api-version 1.2 resource class list --sort-column name | head -10
 else
     echo "  ✗ Placement API not responding to OpenStack CLI!"
     echo "  Check logs: sudo journalctl -u placement-api -n 50"

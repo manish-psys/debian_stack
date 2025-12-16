@@ -3,37 +3,25 @@
 # 19-placement-db.sh
 # Create Placement database and Keystone entities
 # Idempotent - safe to run multiple times
+# Sources openstack-env.sh for centralized configuration
 ###############################################################################
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# =============================================================================
 # Source shared environment
-# =============================================================================
-if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
-    source "${SCRIPT_DIR}/openstack-env.sh"
-else
-    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
-    echo "Please ensure openstack-env.sh is in the same directory as this script."
-    exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Step 19: Placement Database and Keystone Setup ==="
+echo "Controller: ${CONTROLLER_HOSTNAME} (${CONTROLLER_IP})"
+echo ""
 
 # ============================================================================
-# PART 1: Create Placement database
+# PART 1: Create Placement database (using helper function)
 # ============================================================================
 echo "[1/3] Creating Placement database..."
 
-sudo mysql <<EOF
-CREATE DATABASE IF NOT EXISTS placement;
-GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' IDENTIFIED BY '${PLACEMENT_DB_PASS}';
-GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' IDENTIFIED BY '${PLACEMENT_DB_PASS}';
-FLUSH PRIVILEGES;
-EOF
-
-echo "  ✓ Placement database created"
+# Use helper function from openstack-env.sh (idempotent)
+create_service_database "placement" "placement" "${PLACEMENT_DB_PASS}"
 
 # ============================================================================
 # PART 2: Load OpenStack credentials
@@ -48,48 +36,19 @@ echo "  ✓ Credentials loaded"
 echo "[3/3] Creating Placement Keystone entities..."
 
 # Create placement user (if not exists)
-if openstack user show placement &>/dev/null; then
+if /usr/bin/openstack user show placement &>/dev/null; then
     echo "  ✓ Placement user already exists"
 else
-    openstack user create --domain default --password "${PLACEMENT_PASS}" placement
+    /usr/bin/openstack user create --domain default --password "${PLACEMENT_PASS}" placement
     echo "  ✓ Placement user created"
 fi
 
 # Add admin role to placement user in service project
-openstack role add --project service --user placement admin 2>/dev/null || true
+/usr/bin/openstack role add --project service --user placement admin 2>/dev/null || true
 echo "  ✓ Admin role assigned to placement user"
 
-# Create placement service (if not exists)
-if openstack service show placement &>/dev/null; then
-    echo "  ✓ Placement service already exists"
-else
-    openstack service create --name placement --description "Placement API" placement
-    echo "  ✓ Placement service created"
-fi
-
-# Create endpoints (check if exists first)
-EXISTING_ENDPOINTS=$(openstack endpoint list --service placement -f value -c Interface 2>/dev/null || true)
-
-if echo "$EXISTING_ENDPOINTS" | grep -q "public"; then
-    echo "  ✓ Public endpoint already exists"
-else
-    openstack endpoint create --region "${REGION_NAME}" placement public "http://${CONTROLLER_IP}:8778"
-    echo "  ✓ Public endpoint created"
-fi
-
-if echo "$EXISTING_ENDPOINTS" | grep -q "internal"; then
-    echo "  ✓ Internal endpoint already exists"
-else
-    openstack endpoint create --region "${REGION_NAME}" placement internal "http://${CONTROLLER_IP}:8778"
-    echo "  ✓ Internal endpoint created"
-fi
-
-if echo "$EXISTING_ENDPOINTS" | grep -q "admin"; then
-    echo "  ✓ Admin endpoint already exists"
-else
-    openstack endpoint create --region "${REGION_NAME}" placement admin "http://${CONTROLLER_IP}:8778"
-    echo "  ✓ Admin endpoint created"
-fi
+# Create service and endpoints (using helper function from openstack-env.sh)
+create_service_endpoints "placement" "placement" "Placement API" "8778"
 
 # ============================================================================
 # Verification
@@ -97,27 +56,49 @@ fi
 echo ""
 echo "Verifying setup..."
 
+ERRORS=0
+
 # Check database
-if sudo mysql -e "SELECT 1 FROM mysql.user WHERE User='placement'" | grep -q 1; then
+if sudo mysql -e "SELECT 1 FROM mysql.user WHERE User='placement'" | /usr/bin/grep -q 1; then
     echo "  ✓ Placement database user exists"
 else
     echo "  ✗ Placement database user missing!"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# Check user can connect
+if mysql -u placement -p"${PLACEMENT_DB_PASS}" -h ${CONTROLLER_IP} -e "SELECT 1;" &>/dev/null 2>&1; then
+    echo "  ✓ User 'placement' can connect from localhost"
+else
+    echo "  ✗ User 'placement' cannot connect!"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # Check Keystone entities
-openstack user show placement -f value -c name &>/dev/null && echo "  ✓ Placement user verified"
-openstack service show placement -f value -c name &>/dev/null && echo "  ✓ Placement service verified"
+/usr/bin/openstack user show placement -f value -c name &>/dev/null && echo "  ✓ Placement user verified"
+/usr/bin/openstack service show placement -f value -c name &>/dev/null && echo "  ✓ Placement service verified"
 
-ENDPOINT_COUNT=$(openstack endpoint list --service placement -f value | wc -l)
+ENDPOINT_COUNT=$(/usr/bin/openstack endpoint list --service placement -f value | wc -l)
 echo "  ✓ Placement endpoints: ${ENDPOINT_COUNT}/3"
 
 echo ""
-echo "=== Placement database and Keystone entities created ==="
-echo ""
-echo "Credentials:"
-echo "  DB User: placement"
-echo "  DB Password: ${PLACEMENT_DB_PASS}"
-echo "  Keystone User: placement"
-echo "  Keystone Password: ${PLACEMENT_PASS}"
-echo ""
-echo "Next: Run 20-placement-install.sh"
+if [ $ERRORS -eq 0 ]; then
+    echo "=========================================="
+    echo "=== ✓ Placement database setup complete ==="
+    echo "=========================================="
+    echo ""
+    echo "Database Configuration:"
+    echo "  Database: placement"
+    echo "  User: placement"
+    echo "  Password: ${PLACEMENT_DB_PASS}"
+    echo "  Connection: mysql+pymysql://placement:${PLACEMENT_DB_PASS}@${CONTROLLER_IP}/placement"
+    echo ""
+    echo "Keystone Configuration:"
+    echo "  User: placement"
+    echo "  Password: ${PLACEMENT_PASS}"
+    echo ""
+    echo "Next: Run 20-placement-install.sh"
+else
+    echo "=== Placement setup completed with $ERRORS error(s) ==="
+    exit 1
+fi
