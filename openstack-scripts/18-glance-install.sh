@@ -3,33 +3,28 @@
 # 18-glance-install.sh
 # Install and configure Glance (Image service) with Ceph backend
 # Idempotent - safe to run multiple times
+#
+# For Debian 13 (Trixie) with native OpenStack packages
+# Glance version: 2:30.0.0-3 (OpenStack 2024.2 Dalmatian)
 ###############################################################################
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# =============================================================================
 # Source shared environment
-# =============================================================================
-if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
-    source "${SCRIPT_DIR}/openstack-env.sh"
-else
-    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
-    echo "Please ensure openstack-env.sh is in the same directory as this script."
-    exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Step 18: Glance Installation ==="
-echo "Using Region: ${REGION_NAME}"
-echo "Using Controller: ${CONTROLLER_IP}"
+echo "Controller: ${CONTROLLER_HOSTNAME} (${CONTROLLER_IP})"
+echo ""
 
 # ============================================================================
 # PART 0: Prerequisites check
 # ============================================================================
 echo "[0/8] Checking prerequisites..."
 
-if ! command -v crudini &> /dev/null; then
-    sudo apt install -y crudini
+# Check crudini using absolute path (avoid PATH issues in different contexts)
+if [ ! -x /usr/bin/crudini ]; then
+    sudo apt-get install -y crudini
 fi
 echo "  ✓ crudini available"
 
@@ -90,7 +85,7 @@ dbc_remove=''
 dbc_dbtype='mysql'
 dbc_dbuser='glance'
 dbc_dbpass='${GLANCE_DB_PASS}'
-dbc_dbserver='localhost'
+dbc_dbserver='${CONTROLLER_IP}'
 dbc_dbname='glance'
 EOF
 
@@ -105,12 +100,19 @@ echo "  ✓ dbconfig-common configured"
 echo "[4/8] Installing Glance packages..."
 
 export DEBIAN_FRONTEND=noninteractive
-sudo -E apt-get -t bullseye-wallaby-backports install -y \
+
+# Debian Trixie has Glance in main repositories - no backports needed
+# Package version: 2:30.0.0-3 (OpenStack 2024.2 Dalmatian)
+sudo -E apt-get install -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     glance python3-rbd
 
 echo "  ✓ Glance packages installed"
+
+# Display installed version
+GLANCE_VERSION=$(dpkg -l glance | grep "^ii" | awk '{print $3}')
+echo "  Installed version: glance ${GLANCE_VERSION}"
 
 # ============================================================================
 # PART 5: Configure Glance
@@ -122,9 +124,9 @@ if [ -f /etc/glance/glance-api.conf ] && [ ! -f /etc/glance/glance-api.conf.orig
     sudo cp /etc/glance/glance-api.conf /etc/glance/glance-api.conf.orig
 fi
 
-# Database connection
+# Database connection (use CONTROLLER_IP for consistency)
 sudo crudini --set /etc/glance/glance-api.conf database connection \
-    "mysql+pymysql://glance:${GLANCE_DB_PASS}@localhost/glance"
+    "mysql+pymysql://glance:${GLANCE_DB_PASS}@${CONTROLLER_IP}/glance"
 
 # Keystone authentication - using helper function from openstack-env.sh
 configure_keystone_authtoken /etc/glance/glance-api.conf glance "$GLANCE_PASS"
