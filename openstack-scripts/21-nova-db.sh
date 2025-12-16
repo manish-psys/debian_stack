@@ -51,28 +51,28 @@ fi
 source ~/admin-openrc
 
 # Verify openstack CLI is available
-if ! command -v openstack &>/dev/null; then
+if ! /usr/bin/openstack --version &>/dev/null; then
     echo "  ✗ ERROR: openstack command not found!"
     exit 1
 fi
 echo "  ✓ OpenStack CLI available"
 
 # Test Keystone authentication
-if ! openstack token issue &>/dev/null; then
+if ! /usr/bin/openstack token issue &>/dev/null; then
     echo "  ✗ ERROR: Cannot authenticate with Keystone!"
     exit 1
 fi
 echo "  ✓ Keystone authentication working"
 
 # Check Placement is ready (Nova depends on Placement)
-if ! openstack service show placement &>/dev/null; then
+if ! /usr/bin/openstack service show placement &>/dev/null; then
     echo "  ✗ ERROR: Placement service not found. Run scripts 19-20 first!"
     exit 1
 fi
 echo "  ✓ Placement service exists"
 
 # Check 'service' project exists
-if ! openstack project show service &>/dev/null; then
+if ! /usr/bin/openstack project show service &>/dev/null; then
     echo "  ✗ ERROR: 'service' project not found. Run Glance scripts first!"
     exit 1
 fi
@@ -85,7 +85,7 @@ echo ""
 echo "[1/4] Creating Nova databases..."
 
 # Create nova_api database
-if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nova_api'" 2>/dev/null | grep -q nova_api; then
+if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nova_api'" 2>/dev/null | /usr/bin/grep -q nova_api; then
     echo "  ✓ Database 'nova_api' already exists"
 else
     sudo mysql -e "CREATE DATABASE nova_api CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
@@ -93,7 +93,7 @@ else
 fi
 
 # Create nova database
-if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nova'" 2>/dev/null | grep -q nova; then
+if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nova'" 2>/dev/null | /usr/bin/grep -q nova; then
     echo "  ✓ Database 'nova' already exists"
 else
     sudo mysql -e "CREATE DATABASE nova CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
@@ -101,7 +101,7 @@ else
 fi
 
 # Create nova_cell0 database
-if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nova_cell0'" 2>/dev/null | grep -q nova_cell0; then
+if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nova_cell0'" 2>/dev/null | /usr/bin/grep -q nova_cell0; then
     echo "  ✓ Database 'nova_cell0' already exists"
 else
     sudo mysql -e "CREATE DATABASE nova_cell0 CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
@@ -155,26 +155,26 @@ echo "[3/4] Creating Keystone user..."
 source ~/admin-openrc
 
 # Create nova user if not exists
-if openstack user show nova &>/dev/null; then
+if /usr/bin/openstack user show nova &>/dev/null; then
     echo "  ✓ User 'nova' already exists"
     # Update password to ensure it matches
-    openstack user set --password "${NOVA_PASS}" nova
+    /usr/bin/openstack user set --password "${NOVA_PASS}" nova
     echo "  ✓ User 'nova' password updated"
 else
-    openstack user create --domain default --password "${NOVA_PASS}" nova
+    /usr/bin/openstack user create --domain default --password "${NOVA_PASS}" nova
     echo "  ✓ User 'nova' created"
 fi
 
 # Assign admin role to nova user in service project
-if openstack role assignment list --user nova --project service --role admin -f value | grep -q admin; then
+if /usr/bin/openstack role assignment list --user nova --project service --role admin -f value | /usr/bin/grep -q admin; then
     echo "  ✓ Admin role already assigned to 'nova' user"
 else
-    openstack role add --project service --user nova admin
+    /usr/bin/openstack role add --project service --user nova admin
     echo "  ✓ Admin role assigned to 'nova' user"
 fi
 
 # Verify user
-if openstack user show nova -f value -c name | grep -q nova; then
+if /usr/bin/openstack user show nova -f value -c name | /usr/bin/grep -q nova; then
     echo "  ✓ User 'nova' verified in Keystone"
 else
     echo "  ✗ ERROR: User verification failed!"
@@ -194,37 +194,37 @@ source ~/admin-openrc
 NOVA_ENDPOINT="http://${CONTROLLER_IP}:8774/v2.1"
 
 # Create compute service if not exists
-if openstack service show nova &>/dev/null; then
+if /usr/bin/openstack service show nova &>/dev/null; then
     echo "  ✓ Service 'nova' already exists"
 else
-    openstack service create --name nova --description "OpenStack Compute" compute
+    /usr/bin/openstack service create --name nova --description "OpenStack Compute" compute
     echo "  ✓ Service 'nova' created"
 fi
 
 # Get existing endpoints for nova service
-EXISTING_ENDPOINTS=$(openstack endpoint list --service nova -f value -c Interface 2>/dev/null || true)
+EXISTING_ENDPOINTS=$(/usr/bin/openstack endpoint list --service nova -f value -c Interface 2>/dev/null || true)
 
 # Create public endpoint if not exists
-if echo "$EXISTING_ENDPOINTS" | grep -q "public"; then
+if echo "$EXISTING_ENDPOINTS" | /usr/bin/grep -q "public"; then
     echo "  ✓ Public endpoint already exists"
 else
-    openstack endpoint create --region "${REGION_NAME}" compute public "${NOVA_ENDPOINT}"
+    /usr/bin/openstack endpoint create --region "${REGION_NAME}" compute public "${NOVA_ENDPOINT}"
     echo "  ✓ Public endpoint created"
 fi
 
 # Create internal endpoint if not exists
-if echo "$EXISTING_ENDPOINTS" | grep -q "internal"; then
+if echo "$EXISTING_ENDPOINTS" | /usr/bin/grep -q "internal"; then
     echo "  ✓ Internal endpoint already exists"
 else
-    openstack endpoint create --region "${REGION_NAME}" compute internal "${NOVA_ENDPOINT}"
+    /usr/bin/openstack endpoint create --region "${REGION_NAME}" compute internal "${NOVA_ENDPOINT}"
     echo "  ✓ Internal endpoint created"
 fi
 
 # Create admin endpoint if not exists
-if echo "$EXISTING_ENDPOINTS" | grep -q "admin"; then
+if echo "$EXISTING_ENDPOINTS" | /usr/bin/grep -q "admin"; then
     echo "  ✓ Admin endpoint already exists"
 else
-    openstack endpoint create --region "${REGION_NAME}" compute admin "${NOVA_ENDPOINT}"
+    /usr/bin/openstack endpoint create --region "${REGION_NAME}" compute admin "${NOVA_ENDPOINT}"
     echo "  ✓ Admin endpoint created"
 fi
 
@@ -241,7 +241,7 @@ ERRORS=0
 
 # Check databases exist
 for DB in nova_api nova nova_cell0; do
-    if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | grep -q "${DB}"; then
+    if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | /usr/bin/grep -q "${DB}"; then
         echo "  ✓ Database '${DB}' exists"
     else
         echo "  ✗ Database '${DB}' missing!"
@@ -250,7 +250,7 @@ for DB in nova_api nova nova_cell0; do
 done
 
 # Check database user
-if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | grep -q nova; then
+if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | /usr/bin/grep -q nova; then
     echo "  ✓ Database user 'nova' exists"
 else
     echo "  ✗ Database user 'nova' missing!"
@@ -258,7 +258,7 @@ else
 fi
 
 # Check Keystone user
-if openstack user show nova &>/dev/null; then
+if /usr/bin/openstack user show nova &>/dev/null; then
     echo "  ✓ Keystone user 'nova' exists"
 else
     echo "  ✗ Keystone user 'nova' missing!"
@@ -266,7 +266,7 @@ else
 fi
 
 # Check service
-if openstack service show nova &>/dev/null; then
+if /usr/bin/openstack service show nova &>/dev/null; then
     echo "  ✓ Compute service 'nova' exists"
 else
     echo "  ✗ Compute service 'nova' missing!"
@@ -274,7 +274,7 @@ else
 fi
 
 # Check endpoints
-ENDPOINT_COUNT=$(openstack endpoint list --service nova -f value 2>/dev/null | wc -l)
+ENDPOINT_COUNT=$(/usr/bin/openstack endpoint list --service nova -f value 2>/dev/null | wc -l)
 if [ "$ENDPOINT_COUNT" -ge 3 ]; then
     echo "  ✓ Endpoints configured: ${ENDPOINT_COUNT}/3"
 else
@@ -285,7 +285,7 @@ fi
 # Show endpoints
 echo ""
 echo "Nova Endpoints:"
-openstack endpoint list --service nova -f table
+/usr/bin/openstack endpoint list --service nova -f table
 
 echo ""
 if [ $ERRORS -eq 0 ]; then

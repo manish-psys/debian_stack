@@ -171,7 +171,7 @@ fi
 
 # Verify critical tables exist
 for TABLE in traits resource_classes resource_providers allocations; do
-    if sudo mysql -N -e "SELECT 1 FROM information_schema.tables WHERE table_schema='placement' AND table_name='${TABLE}';" 2>/dev/null | grep -q 1; then
+    if sudo mysql -N -e "SELECT 1 FROM information_schema.tables WHERE table_schema='placement' AND table_name='${TABLE}';" 2>/dev/null | /usr/bin/grep -q 1; then
         echo "  ✓ Table exists: ${TABLE}"
     else
         echo "  ✗ ERROR: Missing table: ${TABLE}"

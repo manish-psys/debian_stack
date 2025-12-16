@@ -40,8 +40,8 @@ echo "Using Region: ${REGION_NAME}"
 echo ""
 echo "[0/8] Checking prerequisites..."
 
-# Check crudini
-if ! command -v crudini &>/dev/null; then
+# Check crudini using absolute path (avoid PATH issues in different contexts)
+if [ ! -x /usr/bin/crudini ]; then
     sudo apt-get install -y crudini
 fi
 echo "  ✓ crudini available"
@@ -56,7 +56,7 @@ echo "  ✓ admin-openrc loaded"
 
 # Check Nova databases exist
 for DB in nova_api nova nova_cell0; do
-    if ! sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | grep -q "${DB}"; then
+    if ! sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | /usr/bin/grep -q "${DB}"; then
         echo "  ✗ ERROR: Database '${DB}' not found. Run 21-nova-db.sh first!"
         exit 1
     fi
@@ -64,14 +64,14 @@ done
 echo "  ✓ Nova databases exist (nova_api, nova, nova_cell0)"
 
 # Check Nova Keystone user
-if ! openstack user show nova &>/dev/null; then
+if ! /usr/bin/openstack user show nova &>/dev/null; then
     echo "  ✗ ERROR: Keystone user 'nova' not found. Run 21-nova-db.sh first!"
     exit 1
 fi
 echo "  ✓ Keystone user 'nova' exists"
 
 # Check Nova service endpoints
-if ! openstack service show nova &>/dev/null; then
+if ! /usr/bin/openstack service show nova &>/dev/null; then
     echo "  ✗ ERROR: Compute service not found. Run 21-nova-db.sh first!"
     exit 1
 fi
@@ -85,7 +85,7 @@ fi
 echo "  ✓ RabbitMQ is running"
 
 # Check RabbitMQ openstack user exists
-if ! sudo rabbitmqctl list_users 2>/dev/null | grep -q "^${RABBIT_USER}"; then
+if ! sudo rabbitmqctl list_users 2>/dev/null | /usr/bin/grep -q "^${RABBIT_USER}"; then
     echo "  ✗ ERROR: RabbitMQ user '${RABBIT_USER}' not found!"
     echo "  Please run 12-openstack-base.sh to create the RabbitMQ user."
     exit 1
@@ -93,14 +93,14 @@ fi
 echo "  ✓ RabbitMQ user '${RABBIT_USER}' exists"
 
 # Check Placement API is responding
-if ! curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8778/" | grep -q "200"; then
+if ! curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8778/" | /usr/bin/grep -q "200"; then
     echo "  ✗ ERROR: Placement API not responding on port 8778!"
     exit 1
 fi
 echo "  ✓ Placement API responding"
 
 # Check Glance API is responding
-if ! curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:9292/" | grep -q "200\|300"; then
+if ! curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:9292/" | /usr/bin/grep -q "200\|300"; then
     echo "  ✗ ERROR: Glance API not responding on port 9292!"
     exit 1
 fi
@@ -129,7 +129,7 @@ dbc_remove=''
 dbc_dbtype='mysql'
 dbc_dbuser='nova'
 dbc_dbpass='${NOVA_DB_PASS}'
-dbc_dbserver='localhost'
+dbc_dbserver='${CONTROLLER_IP}'
 dbc_dbname='nova_api'
 EOF
 
@@ -141,7 +141,7 @@ dbc_remove=''
 dbc_dbtype='mysql'
 dbc_dbuser='nova'
 dbc_dbpass='${NOVA_DB_PASS}'
-dbc_dbserver='localhost'
+dbc_dbserver='${CONTROLLER_IP}'
 dbc_dbname='nova'
 EOF
 
@@ -157,12 +157,19 @@ echo ""
 echo "[2/8] Installing Nova packages..."
 
 export DEBIAN_FRONTEND=noninteractive
-sudo -E apt-get -t bullseye-wallaby-backports install -y \
+
+# Debian Trixie has Nova in main repositories - no backports needed
+# Package version: 2:31.0.0-6+deb13u1 (OpenStack 2024.2 Dalmatian)
+sudo -E apt-get install -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     nova-api nova-conductor nova-scheduler nova-novncproxy nova-compute
 
 echo "  ✓ Nova packages installed"
+
+# Display installed version
+NOVA_VERSION=$(dpkg -l nova-common 2>/dev/null | /usr/bin/grep "^ii" | awk '{print $3}')
+echo "  Installed version: nova ${NOVA_VERSION}"
 
 # Configure nova-consoleproxy to use noVNC (required for Debian)
 # Without this, nova-novncproxy service exits immediately
@@ -216,26 +223,17 @@ echo "  ✓ [api] section configured"
 
 # --- [api_database] section ---
 sudo crudini --set /etc/nova/nova.conf api_database connection \
-    "mysql+pymysql://nova:${NOVA_DB_PASS}@localhost/nova_api"
+    "mysql+pymysql://nova:${NOVA_DB_PASS}@${CONTROLLER_IP}/nova_api"
 echo "  ✓ [api_database] section configured"
 
 # --- [database] section ---
 sudo crudini --set /etc/nova/nova.conf database connection \
-    "mysql+pymysql://nova:${NOVA_DB_PASS}@localhost/nova"
+    "mysql+pymysql://nova:${NOVA_DB_PASS}@${CONTROLLER_IP}/nova"
 echo "  ✓ [database] section configured"
 
 # --- [keystone_authtoken] section ---
-# Using helper function pattern but inline for reliability
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken www_authenticate_uri "${KEYSTONE_AUTH_URL}"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken auth_url "${KEYSTONE_AUTH_URL}"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken memcached_servers "localhost:11211"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken auth_type "password"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken project_domain_name "Default"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken user_domain_name "Default"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken project_name "service"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken username "nova"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken password "${NOVA_PASS}"
-sudo crudini --set /etc/nova/nova.conf keystone_authtoken region_name "${REGION_NAME}"
+# Using helper function from openstack-env.sh for consistency
+configure_keystone_authtoken /etc/nova/nova.conf nova "$NOVA_PASS"
 echo "  ✓ [keystone_authtoken] section configured"
 
 # --- [vnc] section ---
@@ -266,7 +264,7 @@ echo "  ✓ [placement] section configured"
 
 # --- [libvirt] section (for nova-compute) ---
 # Detect virtualization support
-if grep -qE '(vmx|svm)' /proc/cpuinfo; then
+if /usr/bin/grep -qE '(vmx|svm)' /proc/cpuinfo; then
     VIRT_TYPE="kvm"
     echo "  ✓ Hardware virtualization detected (KVM)"
 else
@@ -310,7 +308,7 @@ echo "  ✓ cell0 mapped"
 
 # Create cell1 if not exists
 echo "  Creating cell1..."
-if sudo nova-manage cell_v2 list_cells 2>/dev/null | grep -q "cell1"; then
+if sudo nova-manage cell_v2 list_cells 2>/dev/null | /usr/bin/grep -q "cell1"; then
     echo "  ✓ cell1 already exists"
 else
     sudo nova-manage cell_v2 create_cell --name=cell1 --verbose
@@ -379,7 +377,7 @@ echo "[7/8] Waiting for services and discovering compute hosts..."
 MAX_RETRIES=15
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8774/" 2>/dev/null | grep -qE "200|300|401"; then
+    if curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}:8774/" 2>/dev/null | /usr/bin/grep -qE "200|300|401"; then
         echo "  ✓ Nova API responding"
         break
     fi
@@ -422,7 +420,7 @@ done
 
 # Check ports are listening
 for PORT in 8774 6080; do
-    if sudo ss -tlnp | grep -q ":${PORT}"; then
+    if sudo ss -tlnp | /usr/bin/grep -q ":${PORT}"; then
         echo "  ✓ Port ${PORT} is listening"
     else
         echo "  ✗ Port ${PORT} is NOT listening!"
@@ -441,11 +439,11 @@ fi
 
 # Test Nova API via OpenStack CLI
 source ~/admin-openrc
-if openstack compute service list &>/dev/null; then
+if /usr/bin/openstack compute service list &>/dev/null; then
     echo "  ✓ Nova API responding to OpenStack CLI"
     echo ""
     echo "Compute Services:"
-    openstack compute service list -f table
+    /usr/bin/openstack compute service list -f table
 else
     echo "  ✗ Nova API not responding to OpenStack CLI!"
     ERRORS=$((ERRORS + 1))
@@ -454,12 +452,12 @@ fi
 # Check hypervisors
 echo ""
 echo "Hypervisors:"
-openstack hypervisor list -f table 2>/dev/null || echo "  (no hypervisors registered yet)"
+/usr/bin/openstack hypervisor list -f table 2>/dev/null || echo "  (no hypervisors registered yet)"
 
 # Check Placement integration
 echo ""
 echo "Resource Providers (from Placement):"
-openstack --os-placement-api-version 1.2 resource provider list -f table 2>/dev/null || echo "  (checking...)"
+/usr/bin/openstack --os-placement-api-version 1.2 resource provider list -f table 2>/dev/null || echo "  (checking...)"
 
 # Final summary
 echo ""

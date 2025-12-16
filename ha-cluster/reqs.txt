@@ -1,0 +1,286 @@
+Hi , We have 5 bare metal servers running latest trixie Debian 13.2 and my operating systems works perfectly fine. 
+I have below things set on the machine.
+OS Installed
+One User is created that have sudo privileges and that user will be managing the server as sysadmin.
+ssh access to all servers works fine.
+Now to add more info below is my networking design .. 
+Below networking design actually explains the network requirements for the cloud deployment.
+Network Requirements Document
+For GRAIT Cloud 3-Rack Padmini Cloud Stack Data Center Deployment
+
+1. Overall Objective
+We require a secure, production-grade, multi-VLAN data center network to support an OVN-OVS & KVM-based cloud environment.
+ The goal is:
+High availability
+Security isolation between infra and tenants
+Efficient routing
+Simple management model
+Vendor-managed switching, routing, firewalling, and cabling
+All routing, switching, firewall, QoS configuration will be performed by the vendor.
+
+2. Network Hardware Requirement
+Routers (2 units)
+Router 1 – OOB + Infra Public Services
+Supports static routing
+Handles /29 public IP block
+Hosts:
+Management VPN endpoint (for remote staff access)
+iDRAC/OOB access routing
+Padmini Cloud Stack public APIs (Dashboard, identity service, etc.)
+
+
+
+Router 2 – BGP Provider Router (Core Network)
+Runs full BGP with ISP
+Advertises Padmini Cloud Stack floating IP prefix
+Handles external tenant traffic
+Connects to the L3 ToR switch that carries tenant-external VLAN
+Must support:
+eBGP with ISP ASN
+
+Switching (per rack)
+1× L3 ToR Switch per rack (minimum 10G uplinks)
+Configured with the following VLANs:
+VLAN
+Name
+Purpose
+VLAN 200
+HOST-MGMT
+Host OS mgmt, admin APIs
+VLAN 210
+TENANT-UNDERLAY
+OVN/OVS VTEP IPs, Geneve/VXLAN tunnels
+VLAN 320
+CEPH-CLUSTER
+Ceph (Storage) replication and cluster heartbeat
+VLAN 110
+TENANT-EXT
+Provider/Floating IP network (to BGP router)
+
+1× L2 OOB Switch
+Only for iDRAC interfaces
+Connects upstream to Router1 VRF/OOB segment
+No connection to tenant or infra VLANs
+Full isolation
+
+
+3. Network Design Requirements
+3.1 VLAN Configuration Requirements
+Vendor must configure VLANs end-to-end across all ToR switches:
+Mandatory VLANs
+VLAN 10 – OOB-MGMT (iDRAC only)
+
+
+L2 only
+Routed to Router1 only
+Not connected to tenant networks
+Access restricted via VPN or whitelisted office IPs
+
+
+VLAN 200 – HOST-MGMT
+Hosts OS management
+Padmini Cloud Stack control-plane internal APIs
+Internal DB + MQ + API communication
+Firewall must restrict tenant access completely
+
+
+VLAN 210 – TENANT-UNDERLAY
+Underlay for OVN Geneve/VXLAN tunnel endpoints
+No north-south routing required
+Must support MTU ≥ 9000 (for Geneve)
+Must support Inter-rack L3 routing
+Must support ECMP
+Must support routing protocols (OSPF or BGP)
+Must support Jumbo MTU ≥ 9000
+Must support multiple uplinks to spines
+
+
+VLAN 320 – CEPH-CLUSTER
+Dedicated for Ceph backend cluster network
+High throughput, low latency
+Strictly restricted from WAN access
+
+
+VLAN 110 – TENANT-EXT (Provider Network)
+Floating IP allocation
+LBaaS external VIPs
+Routed only through Router2 (BGP)
+Must not mix with infra networks
+
+
+3.2 Routing Requirements
+Router 1 (OOB + Infra)
+Provide routing for:
+VLAN 10 (OOB)
+VLAN 200 (Host mgmt)
+Provide access to:
+VPN for admin access
+Padmini Cloud Stack API public endpoints (API/Dashboard/Identity Management)
+Internet access via static IPs from /29
+Strict ACLs:
+Only VPN and office static IP ranges permitted
+Router 2 (BGP)
+Terminate VLAN 110
+Perform eBGP with ISP
+Advertise tenant public prefix (Floating IP block):
+ISP must accept /24 or larger
+Receive default route from ISP
+All tenant north-south traffic must pass via Router2
+ACLs:
+Prevent access from tenant networks to infra VLANs
+
+
+3.3 Firewall Requirements
+Vendor must implement firewall policies:
+Between Tenant and Infra Networks
+Deny all from:
+VLAN 110 → VLAN 200
+VLAN 110 → VLAN 210
+VLAN 110 → VLAN 320
+Only allow required routing for NAT/BGP peering
+
+
+Between Underlay and Host-MGMT
+Allow only:
+OVN/OVS tunnel traffic
+Controller <-> compute communication
+OOB Firewall
+Only VPN users should reach VLAN 10
+No direct Internet access to any iDRAC port
+No tenant traffic must ever reach OOB
+
+
+Ceph Firewall
+Ceph ports only between Ceph nodes on VLAN 320
+No WAN routing allowed
+
+
+
+
+4. Quality of Service (QoS) Requirements
+Vendor must configure minimum QoS:
+Priority Order (highest → lowest)
+Management / OOB / VLAN10+VLAN200
+Ceph VLAN 320
+Tenant Overlay VLAN 210
+Tenant Public VLAN 110
+
+
+This prevents tunnel/tenant traffic from saturating management or Ceph.
+Minimum Required:
+Weighted Fair Queuing or similar
+Priority queue for Host-MGMT
+Flow shaping for VLAN 110
+
+5. Cabling Requirements
+From ToR to Each Server (per rack, 20 servers)
+NIC1 → VLAN110
+NIC2 → VLAN200
+NIC3 → VLAN210
+NIC4 → VLAN320
+iDRAC → OOB Switch (VLAN10)
+Total per rack: 20 × 4 = 80 copper + 20 OOB = 100 cables
+Uplinks
+ToR → Router1 (L3) – 10G
+ToR → Router2 (L3) – 10G
+ToR → Other ToRs – 10G/40G per spine/aggregation design
+OOB Network
+OOB Switch → OOB Router = 1–2 cables
+OOB Switch → Jump Host = 1 cable
+
+6. IPAM, Monitoring & Auditing Requirements
+6.1 IPAM Solution (Mandatory)
+Vendor must implement and integrate:
+NetBox (preferred open-source IPAM/DCIM)
+Maintain:
+IP allocations per VLAN
+Rack server inventory
+Switch ports and cable mapping
+VRFs for OOB, Infra, Tenant
+
+
+Provide:
+Web UI
+Role-based access
+API support
+Vendor must also:
+Populate initial IP plan
+Maintain prefix usage
+Update device records as part of project handover
+
+6.2 Network Monitoring (Mandatory)
+Vendor must deploy a monitoring stack capable of:
+SNMP monitoring for routers and switches
+Interface traffic monitoring
+VLAN utilization
+BGP session health
+Alerts via email/Slack (threshold-based)
+Recommended open-source options:
+Prometheus + Grafana + SNMP Exporter
+LibreNMS (preferred fully integrated solution)
+
+
+Monitoring must include:
+Router CPU/memory
+Link failures
+VLAN congestion
+OOB switch health
+BGP flap alerts
+High tenant overlay load alerts
+Ceph cluster network alerts
+
+6.3 Network Audit and Logging Requirements
+Vendor must ensure:
+All router/switch logs sent to centralized syslog
+Logs retained for 1 year minimum
+Configuration backup system (RANCID/oxidized or similar)
+Alerts on:
+Unauthorized config changes
+ACL modifications
+BGP session resets
+VLAN configuration changes
+
+7. Security Requirements
+Vendor must implement:
+Mandatory Security Controls
+No layer-2 adjacency between tenants and infra
+Private VLAN or ACL isolation for provider network
+Disable unused switch ports
+Port security to limit MAC addresses (optional but recommended)
+Storm control on all access ports
+MTU validation for overlay networks
+SSH key-based access for all switch/router admins
+Role-based access control (RBAC)
+
+
+8. Vendor Handover Requirements
+Vendor must provide documentation including:
+Complete L2/L3 topology diagram
+VLAN-to-port mapping for all switches
+Router configuration (sanitized)
+Firewall rule sets
+Cable plan + rack elevation diagram
+IPAM (NetBox) with:
+Prefixes
+IP assignments
+VLAN definitions
+Device inventory
+Monitoring dashboard
+Failover test report (BGP, link failover, ToR uplink failure)
+(As of now, the requirement document does not cover high-availability redundancy such as VRRP/HSRP or the deployment of additional physical routers and spine switches. Therefore, it is understood that the failover report will be negative. However, including the test reports along with a disclaimer and a word of caution is acceptable.)
+
+
+
+ok , now given all above , Cna you please advice on the below question ?
+I have decided to make all servers including control plane and data plane nodes to be part of Ceph Cluster.
+SO all OSD 's disk connected to all servers will form distrubited ceph cluster for me.
+Secondly I want all 3 servers to become just control plane for open stack components on those three servers I will not deploy or run any VM or any tenant workload.
+so I am thinking to dedicate 3 machines just for managing open stack and making open stack truely production grade HA.
+
+Can you please create complete design to achieve that ?
+By design I mean what sets of components and apps will be deployed on each of the machine. 
+for now please consider that 3 machine HA open stack cluster but other 2 will be just for tenants workload VMs only.
+then in future we have plan to add more workers tenants machines and we will scale upto 60 workers machines.
+Can you please provide complete design for that ?
+Also please provide the steps to deploy that design so what will be the sequence of deployment.
+and what services will be running on each machine.

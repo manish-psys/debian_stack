@@ -7,6 +7,11 @@
 # NOTE: This does NOT touch Script 21 items (databases, Keystone user/service)
 #       Only cleans up what Script 22 installs
 ###############################################################################
+set -e
+
+# Source shared environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Nova Installation Cleanup (Script 22 only) ==="
 echo ""
@@ -42,7 +47,7 @@ echo "  ✓ All Nova services stopped"
 
 echo "[2/5] Removing Nova packages..."
 NOVA_PACKAGES="nova-api nova-conductor nova-scheduler nova-novncproxy nova-compute nova-common python3-nova"
-if dpkg -l nova-api 2>/dev/null | grep -q "^ii"; then
+if dpkg -l nova-api 2>/dev/null | /usr/bin/grep -q "^ii"; then
     sudo apt-get remove --purge -y $NOVA_PACKAGES 2>/dev/null || true
     sudo apt-get autoremove -y 2>/dev/null || true
     echo "  ✓ Nova packages removed"
@@ -118,7 +123,7 @@ echo "[5/5] Verifying cleanup..."
 CLEAN=true
 
 # Check packages removed
-if dpkg -l nova-api 2>/dev/null | grep -q "^ii"; then
+if dpkg -l nova-api 2>/dev/null | /usr/bin/grep -q "^ii"; then
     echo "  ✗ WARNING: nova-api package still installed"
     CLEAN=false
 else
@@ -135,7 +140,7 @@ fi
 
 # Check ports are free
 for PORT in 8774 6080; do
-    if sudo ss -tlnp 2>/dev/null | grep -q ":${PORT}"; then
+    if sudo ss -tlnp 2>/dev/null | /usr/bin/grep -q ":${PORT}"; then
         echo "  ✗ WARNING: Port ${PORT} still in use"
         CLEAN=false
     else

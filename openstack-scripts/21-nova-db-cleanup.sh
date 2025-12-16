@@ -4,6 +4,11 @@
 # Remove Nova database and Keystone entities for clean re-testing
 # Run this before re-running 21-nova-db.sh
 ###############################################################################
+set -e
+
+# Source shared environment
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/openstack-env.sh"
 
 echo "=== Nova Database Cleanup (Script 21 only) ==="
 echo ""
@@ -29,15 +34,15 @@ if [ -f ~/admin-openrc ]; then
 fi
 
 # Delete endpoints first (they reference the service)
-if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
-    for ENDPOINT_ID in $(openstack endpoint list --service nova -f value -c ID 2>/dev/null); do
-        openstack endpoint delete "$ENDPOINT_ID" 2>/dev/null || true
+if /usr/bin/openstack --version &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
+    for ENDPOINT_ID in $(/usr/bin/openstack endpoint list --service nova -f value -c ID 2>/dev/null); do
+        /usr/bin/openstack endpoint delete "$ENDPOINT_ID" 2>/dev/null || true
         echo "  ✓ Deleted endpoint $ENDPOINT_ID"
     done
 
     # Delete service
-    if openstack service show nova &>/dev/null; then
-        openstack service delete nova
+    if /usr/bin/openstack service show nova &>/dev/null; then
+        /usr/bin/openstack service delete nova
         echo "  ✓ Deleted 'nova' service"
     else
         echo "  ✓ Service 'nova' not found (OK)"
@@ -47,9 +52,9 @@ else
 fi
 
 echo "[2/4] Removing Keystone user..."
-if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
-    if openstack user show nova &>/dev/null; then
-        openstack user delete nova
+if /usr/bin/openstack --version &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
+    if /usr/bin/openstack user show nova &>/dev/null; then
+        /usr/bin/openstack user delete nova
         echo "  ✓ Deleted 'nova' user"
     else
         echo "  ✓ User 'nova' not found (OK)"
@@ -60,7 +65,7 @@ fi
 
 echo "[3/4] Removing databases..."
 for DB in nova_api nova nova_cell0; do
-    if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | grep -q "${DB}"; then
+    if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | /usr/bin/grep -q "${DB}"; then
         sudo mysql -e "DROP DATABASE ${DB};"
         echo "  ✓ Dropped database '${DB}'"
     else
@@ -69,7 +74,7 @@ for DB in nova_api nova nova_cell0; do
 done
 
 echo "[4/4] Removing database user..."
-if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | grep -q nova; then
+if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | /usr/bin/grep -q nova; then
     sudo mysql -e "DROP USER IF EXISTS 'nova'@'localhost';"
     sudo mysql -e "DROP USER IF EXISTS 'nova'@'%';"
     sudo mysql -e "FLUSH PRIVILEGES;"
@@ -85,7 +90,7 @@ CLEAN=true
 
 # Check databases removed
 for DB in nova_api nova nova_cell0; do
-    if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | grep -q "${DB}"; then
+    if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB}'" 2>/dev/null | /usr/bin/grep -q "${DB}"; then
         echo "  ✗ WARNING: Database '${DB}' still exists"
         CLEAN=false
     else
@@ -94,7 +99,7 @@ for DB in nova_api nova nova_cell0; do
 done
 
 # Check user removed
-if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | grep -q nova; then
+if sudo mysql -e "SELECT User FROM mysql.user WHERE User='nova'" 2>/dev/null | /usr/bin/grep -q nova; then
     echo "  ✗ WARNING: Database user 'nova' still exists"
     CLEAN=false
 else
@@ -102,9 +107,9 @@ else
 fi
 
 # Check Keystone items if CLI available
-if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
+if /usr/bin/openstack --version &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
     # Check Keystone user removed
-    if openstack user show nova &>/dev/null 2>&1; then
+    if /usr/bin/openstack user show nova &>/dev/null 2>&1; then
         echo "  ✗ WARNING: Keystone user 'nova' still exists"
         CLEAN=false
     else
@@ -112,7 +117,7 @@ if command -v openstack &>/dev/null && [ -n "$OS_AUTH_URL" ]; then
     fi
 
     # Check service removed
-    if openstack service show nova &>/dev/null 2>&1; then
+    if /usr/bin/openstack service show nova &>/dev/null 2>&1; then
         echo "  ✗ WARNING: Service 'nova' still exists"
         CLEAN=false
     else
