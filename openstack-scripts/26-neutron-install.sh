@@ -21,6 +21,12 @@
 # - Native DHCP (no DHCP agent needed)
 # - Better performance with kernel datapath
 # - Simpler architecture for cloud networking
+#
+# LESSON LEARNED (2025-12-18):
+# When OVN takes control of OVS bridges, it sets fail_mode=secure which drops
+# all traffic unless explicit OpenFlow rules exist. For the provider bridge
+# that carries management traffic, we MUST add a NORMAL flow rule to allow
+# traffic to pass through, otherwise network connectivity is lost.
 ###############################################################################
 set -e
 
@@ -44,11 +50,30 @@ echo "Using Region: ${REGION_NAME}"
 PROVIDER_BRIDGE="${PROVIDER_BRIDGE_NAME:-br-provider}"
 PROVIDER_NETWORK="${PROVIDER_NETWORK_NAME:-physnet1}"
 
+# =============================================================================
+# Helper function: Ensure provider bridge allows traffic
+# This is CRITICAL for maintaining network connectivity when OVN manages OVS
+# =============================================================================
+ensure_provider_bridge_connectivity() {
+    echo "  Ensuring provider bridge allows traffic..."
+
+    # Remove fail_mode: secure if set (OVN sets this automatically)
+    # For provider bridge carrying management traffic, we need traffic to flow
+    sudo ovs-vsctl remove bridge ${PROVIDER_BRIDGE} fail_mode secure 2>/dev/null || true
+
+    # Add default NORMAL flow rule to allow all traffic through provider bridge
+    # This is essential because OVN's fail_mode: secure drops all packets
+    # without explicit OpenFlow rules
+    sudo ovs-ofctl add-flow ${PROVIDER_BRIDGE} "priority=0,actions=NORMAL" 2>/dev/null || true
+
+    echo "  ✓ Provider bridge connectivity ensured"
+}
+
 # ============================================================================
 # PART 0: Prerequisites Check
 # ============================================================================
 echo ""
-echo "[0/8] Checking prerequisites..."
+echo "[0/9] Checking prerequisites..."
 
 # Check crudini using absolute path
 if [ ! -x /usr/bin/crudini ]; then
@@ -128,10 +153,32 @@ fi
 echo "  ✓ Nova API is running"
 
 # ============================================================================
-# PART 1: Pre-seed dbconfig-common
+# PART 1: Pre-protect provider bridge connectivity
 # ============================================================================
 echo ""
-echo "[1/8] Configuring dbconfig-common..."
+echo "[1/9] Pre-protecting provider bridge connectivity..."
+
+# CRITICAL: Before installing Neutron/OVN packages, ensure the provider bridge
+# has flow rules to allow traffic. OVN will set fail_mode: secure which blocks
+# all traffic without explicit rules.
+ensure_provider_bridge_connectivity
+
+# Verify we still have network connectivity
+if ! ping -c 1 -W 2 ${CONTROLLER_IP} &>/dev/null; then
+    # Try the gateway
+    GATEWAY=$(ip route | /usr/bin/grep "^default" | awk '{print $3}' | head -1)
+    if [ -n "$GATEWAY" ] && ! ping -c 1 -W 2 $GATEWAY &>/dev/null; then
+        echo "  ⚠️  WARNING: Network connectivity may be impaired!"
+        echo "  ⚠️  Proceeding anyway, but watch for issues."
+    fi
+fi
+echo "  ✓ Network connectivity verified"
+
+# ============================================================================
+# PART 2: Pre-seed dbconfig-common
+# ============================================================================
+echo ""
+echo "[2/9] Configuring dbconfig-common..."
 
 sudo mkdir -p /etc/dbconfig-common
 
@@ -150,10 +197,10 @@ echo "neutron-server neutron-server/dbconfig-install boolean false" | sudo debco
 echo "  ✓ dbconfig-common configured"
 
 # ============================================================================
-# PART 2: Install Neutron packages (OVN-based)
+# PART 3: Install Neutron packages (OVN-based)
 # ============================================================================
 echo ""
-echo "[2/8] Installing Neutron packages (ML2/OVN)..."
+echo "[3/9] Installing Neutron packages (ML2/OVN)..."
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -173,13 +220,19 @@ echo "  ✓ Neutron packages installed"
 NEUTRON_VERSION=$(dpkg -l neutron-common 2>/dev/null | /usr/bin/grep "^ii" | awk '{print $3}')
 echo "  Installed version: neutron ${NEUTRON_VERSION}"
 
+# CRITICAL: Re-ensure provider bridge connectivity after package installation
+# Package post-install scripts may have started OVN services that modified bridge config
+echo ""
+echo "  Re-ensuring provider bridge connectivity after package install..."
+ensure_provider_bridge_connectivity
+
 # ============================================================================
-# PART 3: Stop services for configuration
+# PART 4: Stop services for configuration
 # ============================================================================
 echo ""
-echo "[3/8] Stopping Neutron services for configuration..."
+echo "[4/9] Stopping Neutron services for configuration..."
 
-for SERVICE in neutron-server neutron-ovn-metadata-agent; do
+for SERVICE in neutron-server neutron-api neutron-rpc-server neutron-ovn-metadata-agent; do
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
         sudo systemctl stop "$SERVICE"
         echo "  ✓ Stopped $SERVICE"
@@ -187,11 +240,14 @@ for SERVICE in neutron-server neutron-ovn-metadata-agent; do
 done
 echo "  ✓ Neutron services stopped"
 
+# Re-ensure connectivity after stopping services
+ensure_provider_bridge_connectivity
+
 # ============================================================================
-# PART 4: Configure neutron.conf
+# PART 5: Configure neutron.conf
 # ============================================================================
 echo ""
-echo "[4/8] Configuring neutron.conf..."
+echo "[5/9] Configuring neutron.conf..."
 
 NEUTRON_CONF="/etc/neutron/neutron.conf"
 
@@ -239,10 +295,10 @@ sudo chown neutron:neutron /var/lib/neutron/tmp
 echo "  ✓ [oslo_concurrency] configured"
 
 # ============================================================================
-# PART 5: Configure ML2 plugin for OVN
+# PART 6: Configure ML2 plugin for OVN
 # ============================================================================
 echo ""
-echo "[5/8] Configuring ML2 plugin for OVN..."
+echo "[6/9] Configuring ML2 plugin for OVN..."
 
 ML2_CONF="/etc/neutron/plugins/ml2/ml2_conf.ini"
 
@@ -280,10 +336,10 @@ sudo crudini --set $ML2_CONF ovn ovn_metadata_enabled "true"
 echo "  ✓ [ovn] configured"
 
 # ============================================================================
-# PART 6: Configure OVN Metadata agent
+# PART 7: Configure OVN Metadata agent
 # ============================================================================
 echo ""
-echo "[6/8] Configuring OVN Metadata agent..."
+echo "[7/9] Configuring OVN Metadata agent..."
 
 OVN_METADATA_CONF="/etc/neutron/neutron_ovn_metadata_agent.ini"
 
@@ -307,10 +363,10 @@ sudo crudini --set $OVN_METADATA_CONF ovn ovn_sb_connection "unix:/var/run/ovn/o
 echo "  ✓ [ovn] configured"
 
 # ============================================================================
-# PART 7: Configure Nova for Neutron/OVN integration
+# PART 8: Configure Nova for Neutron/OVN integration
 # ============================================================================
 echo ""
-echo "[7/8] Configuring Nova for Neutron..."
+echo "[8/9] Configuring Nova for Neutron..."
 
 NOVA_CONF="/etc/nova/nova.conf"
 
@@ -328,10 +384,10 @@ sudo crudini --set $NOVA_CONF neutron metadata_proxy_shared_secret "${METADATA_S
 echo "  ✓ Nova [neutron] section configured"
 
 # ============================================================================
-# PART 8: Configure OVS for OVN integration
+# PART 9: Configure OVS for OVN integration and ensure connectivity
 # ============================================================================
 echo ""
-echo "[8/8] Configuring OVS for OVN integration..."
+echo "[9/9] Configuring OVS for OVN integration..."
 
 # Set OVS external-ids for OVN
 sudo ovs-vsctl set open . external-ids:ovn-bridge="${PROVIDER_BRIDGE}"
@@ -344,6 +400,34 @@ if [ ! -L /etc/neutron/plugin.ini ]; then
     echo "  ✓ ML2 plugin symlink created"
 else
     echo "  ✓ ML2 plugin symlink exists"
+fi
+
+# CRITICAL: Final ensure of provider bridge connectivity
+# This must be the LAST thing we do to ensure traffic flows
+echo ""
+echo "  Final connectivity protection..."
+ensure_provider_bridge_connectivity
+
+# Verify network connectivity at the end
+echo ""
+echo "  Verifying network connectivity..."
+GATEWAY=$(ip route | /usr/bin/grep "^default" | awk '{print $3}' | head -1)
+if [ -n "$GATEWAY" ]; then
+    if ping -c 2 -W 2 $GATEWAY &>/dev/null; then
+        echo "  ✓ Network connectivity OK (gateway $GATEWAY reachable)"
+    else
+        echo "  ⚠️  WARNING: Gateway $GATEWAY not reachable!"
+        echo "  ⚠️  Attempting emergency connectivity fix..."
+        sudo ovs-ofctl add-flow ${PROVIDER_BRIDGE} "priority=0,actions=NORMAL"
+        sleep 1
+        if ping -c 2 -W 2 $GATEWAY &>/dev/null; then
+            echo "  ✓ Emergency fix successful - connectivity restored"
+        else
+            echo "  ✗ Network still unreachable - manual intervention may be needed"
+        fi
+    fi
+else
+    echo "  ⚠️  No default gateway found"
 fi
 
 echo ""
@@ -366,5 +450,7 @@ echo "  - Geneve tunnels for tenant networks"
 echo ""
 echo "Metadata secret: ${METADATA_SECRET}"
 echo "Bridge mapping: ${PROVIDER_NETWORK}:${PROVIDER_BRIDGE}"
+echo ""
+echo "IMPORTANT: Provider bridge has NORMAL flow rule to allow management traffic."
 echo ""
 echo "Next: Run 27-neutron-sync.sh"
