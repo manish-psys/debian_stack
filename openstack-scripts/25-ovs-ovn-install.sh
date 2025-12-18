@@ -218,6 +218,23 @@ sudo systemctl enable ovn-host
 sudo systemctl start ovn-host
 echo "  ✓ OVN host service running"
 
+# CRITICAL: Fix OVN socket permissions for Neutron access
+# OVN creates sockets with restrictive permissions (root:root 750)
+# Neutron services need to connect to these sockets
+# Setting 777 allows neutron user to access OVN databases
+echo "  Setting OVN socket permissions for Neutron..."
+sudo chmod 777 /var/run/ovn/ovnnb_db.sock /var/run/ovn/ovnsb_db.sock 2>/dev/null || true
+
+# Create systemd override to fix permissions after OVN restarts
+# This ensures permissions persist across service restarts/reboots
+sudo mkdir -p /etc/systemd/system/ovn-central.service.d
+cat <<'EOF' | sudo tee /etc/systemd/system/ovn-central.service.d/socket-permissions.conf > /dev/null
+[Service]
+ExecStartPost=/bin/bash -c 'sleep 2 && chmod 777 /var/run/ovn/ovnnb_db.sock /var/run/ovn/ovnsb_db.sock 2>/dev/null || true'
+EOF
+sudo systemctl daemon-reload
+echo "  ✓ OVN socket permissions set (persistent)"
+
 # ============================================================================
 # PART 4: Check if bridge migration is needed
 # ============================================================================

@@ -462,6 +462,107 @@ fi
 
 ---
 
+## Category 7: OVN/Neutron Integration Issues
+
+### Issue 7.1: OVN Socket Permissions Block Neutron Access
+
+**Symptom:**
+```
+Neutron API hangs indefinitely - curl to port 9696 connects but never returns
+```
+`openstack network list` hangs forever. Service appears running but unresponsive.
+
+**Root Cause:**
+- OVN creates database sockets with restrictive permissions: `srwxr-x--- root root`
+- Neutron service (running as `neutron` user) cannot connect to OVN databases
+- Sockets at `/var/run/ovn/ovnnb_db.sock` and `/var/run/ovn/ovnsb_db.sock`
+- Neutron ML2/OVN plugin blocks waiting for OVN connection
+
+**Fix Applied:**
+```bash
+# Immediate fix
+sudo chmod 777 /var/run/ovn/ovnnb_db.sock /var/run/ovn/ovnsb_db.sock
+
+# Permanent fix - systemd override
+sudo mkdir -p /etc/systemd/system/ovn-central.service.d
+cat <<'EOF' | sudo tee /etc/systemd/system/ovn-central.service.d/socket-permissions.conf
+[Service]
+ExecStartPost=/bin/bash -c 'sleep 2 && chmod 777 /var/run/ovn/ovnnb_db.sock /var/run/ovn/ovnsb_db.sock 2>/dev/null || true'
+EOF
+sudo systemctl daemon-reload
+```
+
+**Trixie Status:** ⚠️ CONFIGURATION REQUIRED - OVN socket permissions are distribution defaults
+
+**Script Requirement (Trixie):** Add socket permission fix to OVN installation script (25-ovs-ovn-install.sh)
+
+---
+
+### Issue 7.2: OVN fail_mode:secure Blocks Provider Bridge Traffic
+
+**Symptom:**
+```
+Network connectivity lost after installing neutron-ovn-metadata-agent
+ping gateway: "Destination Host Unreachable"
+```
+Server becomes unreachable via SSH during Neutron installation.
+
+**Root Cause:**
+- OVN sets `fail_mode: secure` on OVS bridges it manages
+- This mode drops ALL packets unless explicit OpenFlow rules exist
+- Provider bridge (br-provider) carries management traffic
+- Without NORMAL flow rule, all management traffic is dropped
+
+**Fix Applied:**
+```bash
+# Remove fail_mode and add NORMAL flow rule
+sudo ovs-vsctl remove bridge br-provider fail_mode secure
+sudo ovs-ofctl add-flow br-provider "priority=0,actions=NORMAL"
+```
+
+Added to script 26-neutron-install.sh with helper function called at multiple points:
+- Before package installation
+- After package installation
+- After stopping services
+- At script end
+
+**Trixie Status:** ⚠️ CONFIGURATION REQUIRED - OVN behavior is by design
+
+**Script Requirement (Trixie):** Protect provider bridge connectivity throughout Neutron installation
+
+---
+
+### Issue 7.3: Debian Trixie Neutron Service Names
+
+**Symptom:**
+```
+Failed to enable unit: Unit neutron-server.service does not exist
+```
+Script fails trying to start `neutron-server`.
+
+**Root Cause:**
+- Debian Trixie splits Neutron into separate services:
+  - `neutron-api` (API server via uwsgi)
+  - `neutron-rpc-server` (RPC messaging)
+- `neutron-server` is a virtual package that installs both
+- But actual systemd services are named differently
+
+**Fix Applied:**
+Updated scripts to use correct service names:
+```bash
+NEUTRON_SERVICES=(
+    "neutron-api"
+    "neutron-rpc-server"
+    "neutron-ovn-metadata-agent"
+)
+```
+
+**Trixie Status:** ℹ️ INFO ONLY - Debian packaging choice
+
+**Script Requirement (Trixie):** Use `neutron-api` and `neutron-rpc-server` instead of `neutron-server`
+
+---
+
 ## New Considerations for Trixie
 
 ### RabbitMQ Quorum Queues
