@@ -137,8 +137,12 @@ echo ""
 echo "[4/6] Starting Neutron services (OVN architecture)..."
 
 # OVN-based Neutron requires only these services on controller:
-# - neutron-server: API and ML2/OVN plugin
+# - neutron-api: API server (Debian Trixie splits this from rpc-server)
+# - neutron-rpc-server: RPC server for internal messaging
 # - neutron-ovn-metadata-agent: Metadata service for VMs
+#
+# NOTE: Debian Trixie uses neutron-api + neutron-rpc-server instead of neutron-server
+#       The neutron-server package is a virtual package that installs both.
 #
 # NOT needed (OVN provides natively):
 # - neutron-dhcp-agent (OVN native DHCP)
@@ -146,7 +150,8 @@ echo "[4/6] Starting Neutron services (OVN architecture)..."
 # - neutron-openvswitch-agent (OVN manages OVS)
 
 NEUTRON_SERVICES=(
-    "neutron-server"
+    "neutron-api"
+    "neutron-rpc-server"
     "neutron-ovn-metadata-agent"
 )
 
@@ -283,7 +288,8 @@ if [ $ERRORS -eq 0 ]; then
     echo "Architecture: ML2/OVN (modern SDN)"
     echo ""
     echo "Services running:"
-    echo "  - neutron-server (API on port 9696)"
+    echo "  - neutron-api (API on port 9696)"
+    echo "  - neutron-rpc-server (internal RPC)"
     echo "  - neutron-ovn-metadata-agent (VM metadata)"
     echo "  - ovn-central (OVN databases)"
     echo "  - ovn-host (OVN controller)"
@@ -306,9 +312,10 @@ else
     echo "=========================================="
     echo ""
     echo "Check logs:"
-    echo "  sudo journalctl -u neutron-server -n 50"
+    echo "  sudo journalctl -u neutron-api -n 50"
+    echo "  sudo journalctl -u neutron-rpc-server -n 50"
     echo "  sudo journalctl -u neutron-ovn-metadata-agent -n 50"
     echo "  sudo journalctl -u ovn-central -n 50"
-    echo "  sudo tail -50 /var/log/neutron/neutron-server.log"
+    echo "  sudo tail -50 /var/log/neutron/neutron-api.log"
     exit 1
 fi
