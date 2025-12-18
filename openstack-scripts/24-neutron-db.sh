@@ -50,14 +50,14 @@ if [ ! -f ~/admin-openrc ]; then
 fi
 source ~/admin-openrc
 
-if ! openstack token issue &>/dev/null; then
+if ! /usr/bin/openstack token issue &>/dev/null; then
     echo "  ✗ ERROR: Cannot authenticate with Keystone!"
     exit 1
 fi
 echo "  ✓ Keystone authentication working"
 
 # Check Nova is installed (Neutron integrates with Nova)
-if ! openstack service show nova &>/dev/null; then
+if ! /usr/bin/openstack service show nova &>/dev/null; then
     echo "  ✗ ERROR: Nova service not found. Run Nova scripts first!"
     exit 1
 fi
@@ -70,7 +70,7 @@ echo ""
 echo "[2/5] Creating Neutron database..."
 
 # Check if database exists and create if not
-if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | grep -q "neutron"; then
+if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | /usr/bin/grep -q "neutron"; then
     echo "  ✓ Database 'neutron' already exists"
 else
     sudo mysql -e "CREATE DATABASE neutron;"
@@ -106,18 +106,18 @@ fi
 echo ""
 echo "[3/5] Creating Keystone user..."
 
-if openstack user show neutron &>/dev/null; then
+if /usr/bin/openstack user show neutron &>/dev/null; then
     echo "  ✓ Keystone user 'neutron' already exists"
     # Update password to ensure it matches
-    openstack user set --password "${NEUTRON_PASS}" neutron
+    /usr/bin/openstack user set --password "${NEUTRON_PASS}" neutron
     echo "  ✓ Keystone user 'neutron' password updated"
 else
-    openstack user create --domain default --password "${NEUTRON_PASS}" neutron
+    /usr/bin/openstack user create --domain default --password "${NEUTRON_PASS}" neutron
     echo "  ✓ Keystone user 'neutron' created"
 fi
 
 # Add admin role (idempotent - won't fail if already exists)
-openstack role add --project service --user neutron admin 2>/dev/null || true
+/usr/bin/openstack role add --project service --user neutron admin 2>/dev/null || true
 echo "  ✓ Admin role assigned to 'neutron' user"
 
 # ============================================================================
@@ -127,20 +127,20 @@ echo ""
 echo "[4/5] Creating Keystone service and endpoints..."
 
 # Create service if not exists
-if openstack service show network &>/dev/null; then
+if /usr/bin/openstack service show network &>/dev/null; then
     echo "  ✓ Network service already exists"
 else
-    openstack service create --name neutron --description "OpenStack Networking" network
+    /usr/bin/openstack service create --name neutron --description "OpenStack Networking" network
     echo "  ✓ Network service created"
 fi
 
 # Create endpoints (delete and recreate to ensure correct URLs)
 for INTERFACE in public internal admin; do
-    EXISTING=$(openstack endpoint list --service network --interface ${INTERFACE} --region ${REGION_NAME} -f value -c ID 2>/dev/null || true)
+    EXISTING=$(/usr/bin/openstack endpoint list --service network --interface ${INTERFACE} --region ${REGION_NAME} -f value -c ID 2>/dev/null || true)
     if [ -n "$EXISTING" ]; then
         echo "  ✓ Network ${INTERFACE} endpoint already exists"
     else
-        openstack endpoint create --region ${REGION_NAME} network ${INTERFACE} "http://${CONTROLLER_IP}:9696"
+        /usr/bin/openstack endpoint create --region ${REGION_NAME} network ${INTERFACE} "http://${CONTROLLER_IP}:9696"
         echo "  ✓ Network ${INTERFACE} endpoint created"
     fi
 done
@@ -154,7 +154,7 @@ echo "[5/5] Verifying setup..."
 ERRORS=0
 
 # Verify database
-if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | grep -q "neutron"; then
+if sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | /usr/bin/grep -q "neutron"; then
     echo "  ✓ Database 'neutron' exists"
 else
     echo "  ✗ Database 'neutron' NOT found!"
@@ -170,7 +170,7 @@ else
 fi
 
 # Verify Keystone user
-if openstack user show neutron &>/dev/null; then
+if /usr/bin/openstack user show neutron &>/dev/null; then
     echo "  ✓ Keystone user 'neutron' exists"
 else
     echo "  ✗ Keystone user 'neutron' NOT found!"
@@ -178,7 +178,7 @@ else
 fi
 
 # Verify service
-if openstack service show network &>/dev/null; then
+if /usr/bin/openstack service show network &>/dev/null; then
     echo "  ✓ Network service registered"
 else
     echo "  ✗ Network service NOT found!"
@@ -186,7 +186,7 @@ else
 fi
 
 # Verify endpoints
-ENDPOINT_COUNT=$(openstack endpoint list --service network -f value -c ID 2>/dev/null | wc -l)
+ENDPOINT_COUNT=$(/usr/bin/openstack endpoint list --service network -f value -c ID 2>/dev/null | wc -l)
 if [ "$ENDPOINT_COUNT" -ge 3 ]; then
     echo "  ✓ Network endpoints configured (${ENDPOINT_COUNT} endpoints)"
 else
@@ -197,7 +197,7 @@ fi
 # Show summary
 echo ""
 echo "Neutron Endpoints:"
-openstack endpoint list --service network -f table
+/usr/bin/openstack endpoint list --service network -f table
 
 # Final summary
 echo ""

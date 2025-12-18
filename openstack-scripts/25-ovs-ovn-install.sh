@@ -54,8 +54,8 @@ detect_physical_interface() {
     fi
     
     # Check if it's already an OVS bridge
-    if command -v ovs-vsctl &>/dev/null; then
-        PHYS_IF=$(sudo ovs-vsctl list-ports ${PROVIDER_BRIDGE} 2>/dev/null | grep -E "^(en|eth)" | head -1)
+    if [ -x /usr/bin/ovs-vsctl ]; then
+        PHYS_IF=$(sudo ovs-vsctl list-ports ${PROVIDER_BRIDGE} 2>/dev/null | /usr/bin/grep -E "^(en|eth)" | head -1)
         if [ -n "$PHYS_IF" ]; then
             echo "$PHYS_IF"
             return
@@ -63,14 +63,14 @@ detect_physical_interface() {
     fi
     
     # Fallback: find first UP physical interface
-    PHYS_IF=$(ip -br link show | grep -E "^(en|eth)" | grep "UP" | awk '{print $1}' | head -1)
+    PHYS_IF=$(ip -br link show | /usr/bin/grep -E "^(en|eth)" | /usr/bin/grep "UP" | awk '{print $1}' | head -1)
     if [ -n "$PHYS_IF" ]; then
         echo "$PHYS_IF"
         return
     fi
-    
+
     # Last resort: first physical interface
-    ip -br link show | grep -E "^(en|eth)" | awk '{print $1}' | head -1
+    ip -br link show | /usr/bin/grep -E "^(en|eth)" | awk '{print $1}' | head -1
 }
 
 PHYSICAL_INTERFACE=$(detect_physical_interface)
@@ -100,13 +100,13 @@ fi
 echo "  ✓ Interface ${PHYSICAL_INTERFACE} exists"
 
 # Get current IP configuration (we'll need to preserve this)
-CURRENT_IP=$(ip -4 addr show ${PROVIDER_BRIDGE} 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
+CURRENT_IP=$(ip -4 addr show ${PROVIDER_BRIDGE} 2>/dev/null | /usr/bin/grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
 if [ -z "$CURRENT_IP" ]; then
     # Maybe IP is on the physical interface directly
-    CURRENT_IP=$(ip -4 addr show ${PHYSICAL_INTERFACE} 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
+    CURRENT_IP=$(ip -4 addr show ${PHYSICAL_INTERFACE} 2>/dev/null | /usr/bin/grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
 fi
 
-CURRENT_GW=$(ip route | grep "^default" | awk '{print $3}' | head -1)
+CURRENT_GW=$(ip route | /usr/bin/grep "^default" | awk '{print $3}' | head -1)
 
 echo "  ✓ Current IP: ${CURRENT_IP:-NOT SET}"
 echo "  ✓ Current Gateway: ${CURRENT_GW:-NOT SET}"
@@ -128,9 +128,9 @@ fi
 echo ""
 echo "[1/7] Installing Open vSwitch..."
 
-if command -v ovs-vsctl &>/dev/null; then
+if [ -x /usr/bin/ovs-vsctl ]; then
     echo "  ✓ OVS already installed"
-    ovs-vsctl --version | head -1 | sed 's/^/    /'
+    /usr/bin/ovs-vsctl --version | head -1 | sed 's/^/    /'
 else
     sudo apt-get update
     sudo apt-get install -y openvswitch-switch openvswitch-common
@@ -165,18 +165,14 @@ echo "  ✓ OVS service running"
 echo ""
 echo "[2/7] Installing OVN..."
 
-# Check if OVN packages are available
+# Check if OVN packages are available (Debian Trixie has them in main repos)
 if ! apt-cache show ovn-central &>/dev/null; then
-    echo "  OVN packages not in default repos, checking backports..."
-    # Try to install from backports if available
-    if apt-cache policy ovn-central 2>/dev/null | grep -q "bullseye-backports"; then
-        OVN_INSTALL_OPTS="-t bullseye-backports"
-    else
-        OVN_INSTALL_OPTS=""
-    fi
-else
-    OVN_INSTALL_OPTS=""
+    echo "  ✗ ERROR: OVN packages not found!"
+    echo "  On Debian Trixie, OVN should be in the main repository."
+    exit 1
 fi
+# No backports needed for Trixie
+OVN_INSTALL_OPTS=""
 
 # Install OVN central (controller node only) and host (all nodes)
 if command -v ovn-nbctl &>/dev/null; then
@@ -235,7 +231,7 @@ if sudo ovs-vsctl br-exists ${PROVIDER_BRIDGE} 2>/dev/null; then
     echo "  ✓ ${PROVIDER_BRIDGE} is already an OVS bridge"
     
     # Check if physical interface is attached
-    if sudo ovs-vsctl list-ports ${PROVIDER_BRIDGE} | grep -q "^${PHYSICAL_INTERFACE}$"; then
+    if sudo ovs-vsctl list-ports ${PROVIDER_BRIDGE} | /usr/bin/grep -q "^${PHYSICAL_INTERFACE}$"; then
         echo "  ✓ ${PHYSICAL_INTERFACE} is attached to ${PROVIDER_BRIDGE}"
     else
         echo "  Adding ${PHYSICAL_INTERFACE} to ${PROVIDER_BRIDGE}..."
@@ -345,7 +341,7 @@ fi
 
 # Get IP without CIDR for gateway config
 IP_ADDR=$(echo "$CURRENT_IP" | cut -d'/' -f1)
-IP_NETMASK=$(ipcalc -m ${CURRENT_IP} 2>/dev/null | grep -oP '(?<=NETMASK=).*' || echo "255.255.255.0")
+IP_NETMASK=$(ipcalc -m ${CURRENT_IP} 2>/dev/null | /usr/bin/grep -oP '(?<=NETMASK=).*' || echo "255.255.255.0")
 
 cat <<EOF | sudo tee ${INTERFACES_FILE} > /dev/null
 # OpenStack OVS Provider Bridge Configuration
@@ -371,7 +367,7 @@ EOF
 echo "  ✓ Network configuration saved to ${INTERFACES_FILE}"
 
 # Ensure main interfaces file sources the directory
-if ! grep -q "source /etc/network/interfaces.d" /etc/network/interfaces 2>/dev/null; then
+if ! /usr/bin/grep -q "source /etc/network/interfaces.d" /etc/network/interfaces 2>/dev/null; then
     echo "source /etc/network/interfaces.d/*" | sudo tee -a /etc/network/interfaces > /dev/null
     echo "  ✓ Added interfaces.d sourcing to /etc/network/interfaces"
 fi
@@ -418,7 +414,7 @@ else
 fi
 
 # Check physical interface is attached
-if sudo ovs-vsctl list-ports ${PROVIDER_BRIDGE} | grep -q "^${PHYSICAL_INTERFACE}$"; then
+if sudo ovs-vsctl list-ports ${PROVIDER_BRIDGE} | /usr/bin/grep -q "^${PHYSICAL_INTERFACE}$"; then
     echo "  ✓ ${PHYSICAL_INTERFACE} attached to ${PROVIDER_BRIDGE}"
 else
     echo "  ✗ ${PHYSICAL_INTERFACE} NOT attached to ${PROVIDER_BRIDGE}!"
@@ -426,7 +422,7 @@ else
 fi
 
 # Check IP is assigned
-if ip addr show ${PROVIDER_BRIDGE} | grep -q "inet "; then
+if ip addr show ${PROVIDER_BRIDGE} | /usr/bin/grep -q "inet "; then
     echo "  ✓ IP address configured on ${PROVIDER_BRIDGE}"
 else
     echo "  ✗ No IP address on ${PROVIDER_BRIDGE}!"

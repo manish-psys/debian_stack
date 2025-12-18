@@ -1,21 +1,26 @@
 #!/bin/bash
 ###############################################################################
 # 26-neutron-install.sh
-# Install and configure Neutron (Networking service) with ML2/OVS
+# Install and configure Neutron (Networking service) with ML2/OVN
 # Idempotent - safe to run multiple times
 #
 # This script installs:
 # - neutron-server: API server
 # - neutron-plugin-ml2: Modular Layer 2 plugin
-# - neutron-openvswitch-agent: OVS agent (replaces linuxbridge-agent)
-# - neutron-dhcp-agent: DHCP service for VMs
-# - neutron-metadata-agent: Metadata service for VMs
-# - neutron-l3-agent: L3 routing (for self-service networks)
+# - neutron-ovn-metadata-agent: Metadata service for VMs (OVN-native)
 #
-# Network Architecture:
+# Network Architecture (OVN-based):
 # - Provider networks: Flat/VLAN on physnet1 (br-provider)
-# - Self-service networks: VXLAN tunnels (optional, can enable later)
-# - Security groups: OVS firewall driver
+# - Self-service networks: Geneve tunnels (OVN native)
+# - Security groups: OVN native (no iptables)
+# - Distributed routing: OVN native L3
+# - DHCP: OVN native (no neutron-dhcp-agent needed)
+#
+# Why OVN over OVS-agent:
+# - Native distributed routing (no L3 agent needed)
+# - Native DHCP (no DHCP agent needed)
+# - Better performance with kernel datapath
+# - Simpler architecture for cloud networking
 ###############################################################################
 set -e
 
@@ -31,7 +36,7 @@ else
     exit 1
 fi
 
-echo "=== Step 26: Neutron Installation (ML2/OVS) ==="
+echo "=== Step 26: Neutron Installation (ML2/OVN) ==="
 echo "Using Controller: ${CONTROLLER_IP}"
 echo "Using Region: ${REGION_NAME}"
 
@@ -43,10 +48,10 @@ PROVIDER_NETWORK="${PROVIDER_NETWORK_NAME:-physnet1}"
 # PART 0: Prerequisites Check
 # ============================================================================
 echo ""
-echo "[0/10] Checking prerequisites..."
+echo "[0/8] Checking prerequisites..."
 
-# Check crudini
-if ! command -v crudini &>/dev/null; then
+# Check crudini using absolute path
+if [ ! -x /usr/bin/crudini ]; then
     sudo apt-get install -y crudini
 fi
 echo "  ✓ crudini available"
@@ -60,21 +65,21 @@ source ~/admin-openrc
 echo "  ✓ admin-openrc loaded"
 
 # Check Neutron database exists
-if ! sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | grep -q "neutron"; then
+if ! sudo mysql -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='neutron'" 2>/dev/null | /usr/bin/grep -q "neutron"; then
     echo "  ✗ ERROR: Database 'neutron' not found. Run 24-neutron-db.sh first!"
     exit 1
 fi
 echo "  ✓ Neutron database exists"
 
 # Check Keystone user
-if ! openstack user show neutron &>/dev/null; then
+if ! /usr/bin/openstack user show neutron &>/dev/null; then
     echo "  ✗ ERROR: Keystone user 'neutron' not found. Run 24-neutron-db.sh first!"
     exit 1
 fi
 echo "  ✓ Keystone user 'neutron' exists"
 
 # Check Neutron service
-if ! openstack service show network &>/dev/null; then
+if ! /usr/bin/openstack service show network &>/dev/null; then
     echo "  ✗ ERROR: Network service not found. Run 24-neutron-db.sh first!"
     exit 1
 fi
@@ -82,14 +87,21 @@ echo "  ✓ Network service registered"
 
 # Check OVS is running
 if ! systemctl is-active --quiet openvswitch-switch; then
-    echo "  ✗ ERROR: OVS is not running. Run 25-ovs-install.sh first!"
+    echo "  ✗ ERROR: OVS is not running. Run 25-ovs-ovn-install.sh first!"
     exit 1
 fi
 echo "  ✓ OVS is running"
 
+# Check OVN central is running
+if ! systemctl is-active --quiet ovn-central; then
+    echo "  ✗ ERROR: OVN central is not running. Run 25-ovs-ovn-install.sh first!"
+    exit 1
+fi
+echo "  ✓ OVN central is running"
+
 # Check OVS bridge exists
 if ! sudo ovs-vsctl br-exists ${PROVIDER_BRIDGE}; then
-    echo "  ✗ ERROR: OVS bridge ${PROVIDER_BRIDGE} not found. Run 25-ovs-install.sh first!"
+    echo "  ✗ ERROR: OVS bridge ${PROVIDER_BRIDGE} not found. Run 25-ovs-ovn-install.sh first!"
     exit 1
 fi
 echo "  ✓ OVS bridge ${PROVIDER_BRIDGE} exists"
@@ -102,7 +114,7 @@ fi
 echo "  ✓ RabbitMQ is running"
 
 # Check RabbitMQ user
-if ! sudo rabbitmqctl list_users 2>/dev/null | grep -q "^${RABBIT_USER}"; then
+if ! sudo rabbitmqctl list_users 2>/dev/null | /usr/bin/grep -q "^${RABBIT_USER}"; then
     echo "  ✗ ERROR: RabbitMQ user '${RABBIT_USER}' not found!"
     exit 1
 fi
@@ -119,7 +131,7 @@ echo "  ✓ Nova API is running"
 # PART 1: Pre-seed dbconfig-common
 # ============================================================================
 echo ""
-echo "[1/10] Configuring dbconfig-common..."
+echo "[1/8] Configuring dbconfig-common..."
 
 sudo mkdir -p /etc/dbconfig-common
 
@@ -130,7 +142,7 @@ dbc_remove=''
 dbc_dbtype='mysql'
 dbc_dbuser='neutron'
 dbc_dbpass='${NEUTRON_DB_PASS}'
-dbc_dbserver='localhost'
+dbc_dbserver='${CONTROLLER_IP}'
 dbc_dbname='neutron'
 EOF
 
@@ -138,33 +150,39 @@ echo "neutron-server neutron-server/dbconfig-install boolean false" | sudo debco
 echo "  ✓ dbconfig-common configured"
 
 # ============================================================================
-# PART 2: Install Neutron packages
+# PART 2: Install Neutron packages (OVN-based)
 # ============================================================================
 echo ""
-echo "[2/10] Installing Neutron packages..."
+echo "[2/8] Installing Neutron packages (ML2/OVN)..."
 
 export DEBIAN_FRONTEND=noninteractive
-sudo -E apt-get -t bullseye-wallaby-backports install -y \
+
+# Debian Trixie has Neutron in main repositories - no backports needed
+# Install OVN-specific packages for modern cloud networking
+sudo -E apt-get install -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     neutron-server \
     neutron-plugin-ml2 \
-    neutron-openvswitch-agent \
-    neutron-dhcp-agent \
-    neutron-metadata-agent \
-    neutron-l3-agent
+    neutron-ovn-metadata-agent \
+    python3-ovsdbapp
 
 echo "  ✓ Neutron packages installed"
+
+# Display installed version
+NEUTRON_VERSION=$(dpkg -l neutron-common 2>/dev/null | /usr/bin/grep "^ii" | awk '{print $3}')
+echo "  Installed version: neutron ${NEUTRON_VERSION}"
 
 # ============================================================================
 # PART 3: Stop services for configuration
 # ============================================================================
 echo ""
-echo "[3/10] Stopping Neutron services for configuration..."
+echo "[3/8] Stopping Neutron services for configuration..."
 
-for SERVICE in neutron-server neutron-openvswitch-agent neutron-dhcp-agent neutron-metadata-agent neutron-l3-agent; do
+for SERVICE in neutron-server neutron-ovn-metadata-agent; do
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
         sudo systemctl stop "$SERVICE"
+        echo "  ✓ Stopped $SERVICE"
     fi
 done
 echo "  ✓ Neutron services stopped"
@@ -173,23 +191,25 @@ echo "  ✓ Neutron services stopped"
 # PART 4: Configure neutron.conf
 # ============================================================================
 echo ""
-echo "[4/10] Configuring neutron.conf..."
+echo "[4/8] Configuring neutron.conf..."
 
 NEUTRON_CONF="/etc/neutron/neutron.conf"
 
 # Backup original
 if [ -f "$NEUTRON_CONF" ] && [ ! -f "${NEUTRON_CONF}.orig" ]; then
     sudo cp "$NEUTRON_CONF" "${NEUTRON_CONF}.orig"
+    echo "  ✓ Original config backed up"
 fi
 
 # [database] section
 sudo crudini --set $NEUTRON_CONF database connection \
-    "mysql+pymysql://neutron:${NEUTRON_DB_PASS}@localhost/neutron"
+    "mysql+pymysql://neutron:${NEUTRON_DB_PASS}@${CONTROLLER_IP}/neutron"
 echo "  ✓ [database] configured"
 
 # [DEFAULT] section
 sudo crudini --set $NEUTRON_CONF DEFAULT core_plugin "ml2"
-sudo crudini --set $NEUTRON_CONF DEFAULT service_plugins "router"
+# OVN provides native L3, DHCP - use OVN router service plugin
+sudo crudini --set $NEUTRON_CONF DEFAULT service_plugins "ovn-router"
 sudo crudini --set $NEUTRON_CONF DEFAULT transport_url "rabbit://${RABBIT_USER}:${RABBIT_PASS}@${CONTROLLER_IP}:5672/"
 sudo crudini --set $NEUTRON_CONF DEFAULT auth_strategy "keystone"
 sudo crudini --set $NEUTRON_CONF DEFAULT notify_nova_on_port_status_changes "true"
@@ -197,21 +217,12 @@ sudo crudini --set $NEUTRON_CONF DEFAULT notify_nova_on_port_data_changes "true"
 sudo crudini --set $NEUTRON_CONF DEFAULT allow_overlapping_ips "true"
 echo "  ✓ [DEFAULT] configured"
 
-# [keystone_authtoken] section
-sudo crudini --set $NEUTRON_CONF keystone_authtoken www_authenticate_uri "http://${CONTROLLER_IP}:5000"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken auth_url "http://${CONTROLLER_IP}:5000"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken memcached_servers "localhost:11211"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken auth_type "password"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken project_domain_name "Default"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken user_domain_name "Default"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken project_name "service"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken username "neutron"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken password "${NEUTRON_PASS}"
-sudo crudini --set $NEUTRON_CONF keystone_authtoken region_name "${REGION_NAME}"
+# [keystone_authtoken] section - using helper function
+configure_keystone_authtoken $NEUTRON_CONF neutron "$NEUTRON_PASS"
 echo "  ✓ [keystone_authtoken] configured"
 
 # [nova] section - for notifications to Nova
-sudo crudini --set $NEUTRON_CONF nova auth_url "http://${CONTROLLER_IP}:5000"
+sudo crudini --set $NEUTRON_CONF nova auth_url "${KEYSTONE_AUTH_URL}"
 sudo crudini --set $NEUTRON_CONF nova auth_type "password"
 sudo crudini --set $NEUTRON_CONF nova project_domain_name "Default"
 sudo crudini --set $NEUTRON_CONF nova user_domain_name "Default"
@@ -223,125 +234,88 @@ echo "  ✓ [nova] configured"
 
 # [oslo_concurrency] section
 sudo crudini --set $NEUTRON_CONF oslo_concurrency lock_path "/var/lib/neutron/tmp"
+sudo mkdir -p /var/lib/neutron/tmp
+sudo chown neutron:neutron /var/lib/neutron/tmp
 echo "  ✓ [oslo_concurrency] configured"
 
 # ============================================================================
-# PART 5: Configure ML2 plugin
+# PART 5: Configure ML2 plugin for OVN
 # ============================================================================
 echo ""
-echo "[5/10] Configuring ML2 plugin..."
+echo "[5/8] Configuring ML2 plugin for OVN..."
 
 ML2_CONF="/etc/neutron/plugins/ml2/ml2_conf.ini"
 
 if [ -f "$ML2_CONF" ] && [ ! -f "${ML2_CONF}.orig" ]; then
     sudo cp "$ML2_CONF" "${ML2_CONF}.orig"
+    echo "  ✓ Original ML2 config backed up"
 fi
 
-# [ml2] section
-# type_drivers: flat for provider, vxlan for self-service (tenant) networks
-sudo crudini --set $ML2_CONF ml2 type_drivers "flat,vlan,vxlan"
-sudo crudini --set $ML2_CONF ml2 tenant_network_types "vxlan"
-sudo crudini --set $ML2_CONF ml2 mechanism_drivers "openvswitch,l2population"
+# [ml2] section - OVN mechanism driver
+sudo crudini --set $ML2_CONF ml2 type_drivers "local,flat,vlan,geneve"
+sudo crudini --set $ML2_CONF ml2 tenant_network_types "geneve"
+sudo crudini --set $ML2_CONF ml2 mechanism_drivers "ovn"
 sudo crudini --set $ML2_CONF ml2 extension_drivers "port_security"
-echo "  ✓ [ml2] configured"
+sudo crudini --set $ML2_CONF ml2 overlay_ip_version "4"
+echo "  ✓ [ml2] configured for OVN"
 
 # [ml2_type_flat] section
 sudo crudini --set $ML2_CONF ml2_type_flat flat_networks "${PROVIDER_NETWORK}"
 echo "  ✓ [ml2_type_flat] configured"
 
-# [ml2_type_vxlan] section - for self-service networks
-sudo crudini --set $ML2_CONF ml2_type_vxlan vni_ranges "1:1000"
-echo "  ✓ [ml2_type_vxlan] configured"
+# [ml2_type_geneve] section - OVN uses geneve tunnels
+sudo crudini --set $ML2_CONF ml2_type_geneve vni_ranges "1:65536"
+sudo crudini --set $ML2_CONF ml2_type_geneve max_header_size "38"
+echo "  ✓ [ml2_type_geneve] configured"
 
-# [securitygroup] section
-sudo crudini --set $ML2_CONF securitygroup enable_ipset "true"
+# [securitygroup] section - OVN native security groups
+sudo crudini --set $ML2_CONF securitygroup enable_security_group "true"
 echo "  ✓ [securitygroup] configured"
 
+# [ovn] section - OVN database connections
+sudo crudini --set $ML2_CONF ovn ovn_nb_connection "unix:/var/run/ovn/ovnnb_db.sock"
+sudo crudini --set $ML2_CONF ovn ovn_sb_connection "unix:/var/run/ovn/ovnsb_db.sock"
+sudo crudini --set $ML2_CONF ovn ovn_l3_scheduler "leastloaded"
+sudo crudini --set $ML2_CONF ovn ovn_metadata_enabled "true"
+echo "  ✓ [ovn] configured"
+
 # ============================================================================
-# PART 6: Configure OVS agent
+# PART 6: Configure OVN Metadata agent
 # ============================================================================
 echo ""
-echo "[6/10] Configuring OVS agent..."
+echo "[6/8] Configuring OVN Metadata agent..."
 
-OVS_AGENT_CONF="/etc/neutron/plugins/ml2/openvswitch_agent.ini"
+OVN_METADATA_CONF="/etc/neutron/neutron_ovn_metadata_agent.ini"
 
-if [ -f "$OVS_AGENT_CONF" ] && [ ! -f "${OVS_AGENT_CONF}.orig" ]; then
-    sudo cp "$OVS_AGENT_CONF" "${OVS_AGENT_CONF}.orig"
+if [ -f "$OVN_METADATA_CONF" ] && [ ! -f "${OVN_METADATA_CONF}.orig" ]; then
+    sudo cp "$OVN_METADATA_CONF" "${OVN_METADATA_CONF}.orig"
+    echo "  ✓ Original OVN metadata config backed up"
 fi
+
+# [DEFAULT] section
+sudo crudini --set $OVN_METADATA_CONF DEFAULT nova_metadata_host "${CONTROLLER_IP}"
+sudo crudini --set $OVN_METADATA_CONF DEFAULT metadata_proxy_shared_secret "${METADATA_SECRET}"
+sudo crudini --set $OVN_METADATA_CONF DEFAULT state_path "/var/lib/neutron"
+echo "  ✓ [DEFAULT] configured"
 
 # [ovs] section
-sudo crudini --set $OVS_AGENT_CONF ovs bridge_mappings "${PROVIDER_NETWORK}:${PROVIDER_BRIDGE}"
-sudo crudini --set $OVS_AGENT_CONF ovs local_ip "${CONTROLLER_IP}"
+sudo crudini --set $OVN_METADATA_CONF ovs ovsdb_connection "unix:/var/run/openvswitch/db.sock"
 echo "  ✓ [ovs] configured"
 
-# [agent] section
-sudo crudini --set $OVS_AGENT_CONF agent tunnel_types "vxlan"
-sudo crudini --set $OVS_AGENT_CONF agent l2_population "true"
-echo "  ✓ [agent] configured"
-
-# [securitygroup] section
-sudo crudini --set $OVS_AGENT_CONF securitygroup enable_security_group "true"
-sudo crudini --set $OVS_AGENT_CONF securitygroup firewall_driver "openvswitch"
-echo "  ✓ [securitygroup] configured"
+# [ovn] section
+sudo crudini --set $OVN_METADATA_CONF ovn ovn_sb_connection "unix:/var/run/ovn/ovnsb_db.sock"
+echo "  ✓ [ovn] configured"
 
 # ============================================================================
-# PART 7: Configure L3 agent
+# PART 7: Configure Nova for Neutron/OVN integration
 # ============================================================================
 echo ""
-echo "[7/10] Configuring L3 agent..."
-
-L3_AGENT_CONF="/etc/neutron/l3_agent.ini"
-
-if [ -f "$L3_AGENT_CONF" ] && [ ! -f "${L3_AGENT_CONF}.orig" ]; then
-    sudo cp "$L3_AGENT_CONF" "${L3_AGENT_CONF}.orig"
-fi
-
-sudo crudini --set $L3_AGENT_CONF DEFAULT interface_driver "openvswitch"
-echo "  ✓ L3 agent configured"
-
-# ============================================================================
-# PART 8: Configure DHCP agent
-# ============================================================================
-echo ""
-echo "[8/10] Configuring DHCP agent..."
-
-DHCP_AGENT_CONF="/etc/neutron/dhcp_agent.ini"
-
-if [ -f "$DHCP_AGENT_CONF" ] && [ ! -f "${DHCP_AGENT_CONF}.orig" ]; then
-    sudo cp "$DHCP_AGENT_CONF" "${DHCP_AGENT_CONF}.orig"
-fi
-
-sudo crudini --set $DHCP_AGENT_CONF DEFAULT interface_driver "openvswitch"
-sudo crudini --set $DHCP_AGENT_CONF DEFAULT dhcp_driver "neutron.agent.linux.dhcp.Dnsmasq"
-sudo crudini --set $DHCP_AGENT_CONF DEFAULT enable_isolated_metadata "true"
-echo "  ✓ DHCP agent configured"
-
-# ============================================================================
-# PART 9: Configure Metadata agent
-# ============================================================================
-echo ""
-echo "[9/10] Configuring Metadata agent..."
-
-METADATA_AGENT_CONF="/etc/neutron/metadata_agent.ini"
-
-if [ -f "$METADATA_AGENT_CONF" ] && [ ! -f "${METADATA_AGENT_CONF}.orig" ]; then
-    sudo cp "$METADATA_AGENT_CONF" "${METADATA_AGENT_CONF}.orig"
-fi
-
-sudo crudini --set $METADATA_AGENT_CONF DEFAULT nova_metadata_host "${CONTROLLER_IP}"
-sudo crudini --set $METADATA_AGENT_CONF DEFAULT metadata_proxy_shared_secret "${METADATA_SECRET}"
-echo "  ✓ Metadata agent configured"
-
-# ============================================================================
-# PART 10: Configure Nova for Neutron integration
-# ============================================================================
-echo ""
-echo "[10/10] Configuring Nova for Neutron..."
+echo "[7/8] Configuring Nova for Neutron..."
 
 NOVA_CONF="/etc/nova/nova.conf"
 
 # [neutron] section
-sudo crudini --set $NOVA_CONF neutron auth_url "http://${CONTROLLER_IP}:5000"
+sudo crudini --set $NOVA_CONF neutron auth_url "${KEYSTONE_AUTH_URL}"
 sudo crudini --set $NOVA_CONF neutron auth_type "password"
 sudo crudini --set $NOVA_CONF neutron project_domain_name "Default"
 sudo crudini --set $NOVA_CONF neutron user_domain_name "Default"
@@ -352,6 +326,17 @@ sudo crudini --set $NOVA_CONF neutron password "${NEUTRON_PASS}"
 sudo crudini --set $NOVA_CONF neutron service_metadata_proxy "true"
 sudo crudini --set $NOVA_CONF neutron metadata_proxy_shared_secret "${METADATA_SECRET}"
 echo "  ✓ Nova [neutron] section configured"
+
+# ============================================================================
+# PART 8: Configure OVS for OVN integration
+# ============================================================================
+echo ""
+echo "[8/8] Configuring OVS for OVN integration..."
+
+# Set OVS external-ids for OVN
+sudo ovs-vsctl set open . external-ids:ovn-bridge="${PROVIDER_BRIDGE}"
+sudo ovs-vsctl set open . external-ids:ovn-bridge-mappings="${PROVIDER_NETWORK}:${PROVIDER_BRIDGE}"
+echo "  ✓ OVS bridge mappings configured"
 
 # Ensure ML2 plugin symlink exists
 if [ ! -L /etc/neutron/plugin.ini ]; then
@@ -366,13 +351,18 @@ echo "=========================================="
 echo "=== Neutron configuration complete ==="
 echo "=========================================="
 echo ""
+echo "Architecture: ML2/OVN (modern SDN)"
+echo ""
 echo "Configuration files:"
 echo "  - /etc/neutron/neutron.conf"
 echo "  - /etc/neutron/plugins/ml2/ml2_conf.ini"
-echo "  - /etc/neutron/plugins/ml2/openvswitch_agent.ini"
-echo "  - /etc/neutron/l3_agent.ini"
-echo "  - /etc/neutron/dhcp_agent.ini"
-echo "  - /etc/neutron/metadata_agent.ini"
+echo "  - /etc/neutron/neutron_ovn_metadata_agent.ini"
+echo ""
+echo "OVN Features enabled:"
+echo "  - Native distributed L3 routing (no L3 agent)"
+echo "  - Native DHCP (no DHCP agent)"
+echo "  - Native security groups (no iptables)"
+echo "  - Geneve tunnels for tenant networks"
 echo ""
 echo "Metadata secret: ${METADATA_SECRET}"
 echo "Bridge mapping: ${PROVIDER_NETWORK}:${PROVIDER_BRIDGE}"

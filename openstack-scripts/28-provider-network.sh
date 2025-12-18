@@ -1,8 +1,13 @@
 #!/bin/bash
 ###############################################################################
 # 28-provider-network.sh
-# Create provider flat network for external VM connectivity
+# Create provider flat network for external VM connectivity (OVN-based)
 # Uses existing LAN infrastructure (DHCP from LAN router or static IPs)
+#
+# OVN Architecture:
+# - Provider network mapped via OVN bridge mappings
+# - OVN native DHCP (no neutron-dhcp-agent)
+# - Flat network type on physnet1
 ###############################################################################
 
 # Exit on undefined variables only - we handle errors manually
@@ -29,7 +34,7 @@ PROVIDER_NET_NAME="provider-net"
 PROVIDER_SUBNET_NAME="provider-subnet"
 
 # Use OpenStack DHCP or rely on external LAN DHCP?
-# true  = OpenStack DHCP agent provides IPs from allocation pool (RECOMMENDED)
+# true  = OVN native DHCP provides IPs from allocation pool (RECOMMENDED)
 # false = VMs must use static IPs or external DHCP
 USE_OPENSTACK_DHCP="true"
 
@@ -37,30 +42,12 @@ USE_OPENSTACK_DHCP="true"
 # LOAD ENVIRONMENT
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/openstack-env.sh"
 
-if [ ! -f "$ENV_FILE" ]; then
-    # Try parent directory
-    ENV_FILE="${SCRIPT_DIR}/../openstack-env.sh"
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    # Try home directory
-    ENV_FILE=~/openstack-env.sh
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    # Try outputs directory
-    ENV_FILE=/mnt/user-data/outputs/openstack-env.sh
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
+if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
+    source "${SCRIPT_DIR}/openstack-env.sh"
 else
-    echo "WARNING: openstack-env.sh not found, using defaults"
-    export PROVIDER_NETWORK_NAME="physnet1"
-    export PROVIDER_BRIDGE_NAME="br-provider"
-    export CONTROLLER_IP="192.168.2.9"
+    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
+    exit 1
 fi
 
 # Source admin credentials
@@ -72,7 +59,7 @@ else
     exit 1
 fi
 
-echo "=== Step 28: Provider Network Creation ==="
+echo "=== Step 28: Provider Network Creation (OVN) ==="
 echo "Using physical network: ${PROVIDER_NETWORK_NAME}"
 echo "Using OVS bridge: ${PROVIDER_BRIDGE_NAME}"
 echo ""
@@ -86,43 +73,53 @@ ERRORS=0
 echo "[1/4] Checking prerequisites..."
 
 # Check Neutron API is responding
-if ! openstack network agent list &>/dev/null; then
+if ! /usr/bin/openstack network agent list &>/dev/null; then
     echo "  ✗ ERROR: Neutron API not responding!"
     echo "  Run 27-neutron-sync.sh first."
     exit 1
 fi
 echo "  ✓ Neutron API responding"
 
-# Check OVS agent is running
-if ! openstack network agent list -f value -c Binary | grep -q "neutron-openvswitch-agent"; then
-    echo "  ✗ ERROR: OVS agent not registered!"
+# Verify ML2/OVN is configured (check for OVN mechanism driver)
+if ! sudo /usr/bin/grep -q "mechanism_drivers.*ovn" /etc/neutron/plugins/ml2/ml2_conf.ini 2>/dev/null; then
+    echo "  ✗ ERROR: ML2/OVN not configured!"
+    echo "  Expected mechanism_drivers = ovn in ml2_conf.ini"
     exit 1
 fi
-echo "  ✓ OVS agent registered"
+echo "  ✓ ML2/OVN mechanism driver configured"
 
-# Check DHCP agent is running (if we're using OpenStack DHCP)
-if [ "$USE_OPENSTACK_DHCP" = "true" ]; then
-    if ! openstack network agent list -f value -c Binary | grep -q "neutron-dhcp-agent"; then
-        echo "  ✗ ERROR: DHCP agent not registered!"
-        exit 1
-    fi
-    echo "  ✓ DHCP agent registered"
+# Check OVN services are running
+if ! systemctl is-active --quiet ovn-central; then
+    echo "  ✗ ERROR: OVN central is not running!"
+    exit 1
 fi
+echo "  ✓ OVN central is running"
 
 # Check OVS bridge exists
 if ! sudo ovs-vsctl br-exists ${PROVIDER_BRIDGE_NAME}; then
     echo "  ✗ ERROR: OVS bridge ${PROVIDER_BRIDGE_NAME} not found!"
-    echo "  Run 25-ovs-install.sh first."
+    echo "  Run 25-ovs-ovn-install.sh first."
     exit 1
 fi
 echo "  ✓ OVS bridge ${PROVIDER_BRIDGE_NAME} exists"
 
-# Check bridge mapping in OVS agent config
-if ! sudo grep -q "bridge_mappings.*${PROVIDER_NETWORK_NAME}:${PROVIDER_BRIDGE_NAME}" \
-    /etc/neutron/plugins/ml2/openvswitch_agent.ini 2>/dev/null; then
-    echo "  ⚠ WARNING: Bridge mapping may not be configured correctly"
+# Check OVN bridge mapping in OVS
+BRIDGE_MAPPING=$(sudo ovs-vsctl get open . external-ids:ovn-bridge-mappings 2>/dev/null || echo "")
+if echo "$BRIDGE_MAPPING" | /usr/bin/grep -q "${PROVIDER_NETWORK_NAME}:${PROVIDER_BRIDGE_NAME}"; then
+    echo "  ✓ OVN bridge mapping configured: ${PROVIDER_NETWORK_NAME}:${PROVIDER_BRIDGE_NAME}"
+else
+    echo "  ⚠ WARNING: OVN bridge mapping may not be configured"
     echo "    Expected: ${PROVIDER_NETWORK_NAME}:${PROVIDER_BRIDGE_NAME}"
+    echo "    Found: ${BRIDGE_MAPPING}"
 fi
+
+# Check flat_networks in ML2 config
+if sudo /usr/bin/grep -q "flat_networks.*${PROVIDER_NETWORK_NAME}" /etc/neutron/plugins/ml2/ml2_conf.ini 2>/dev/null; then
+    echo "  ✓ Flat network '${PROVIDER_NETWORK_NAME}' configured in ML2"
+else
+    echo "  ⚠ WARNING: flat_networks may not include ${PROVIDER_NETWORK_NAME}"
+fi
+
 echo "  ✓ Prerequisites OK"
 
 # =============================================================================
@@ -132,11 +129,11 @@ echo ""
 echo "[2/4] Creating provider network..."
 
 # Check if network already exists
-if openstack network show "${PROVIDER_NET_NAME}" &>/dev/null; then
+if /usr/bin/openstack network show "${PROVIDER_NET_NAME}" &>/dev/null; then
     echo "  ✓ Provider network '${PROVIDER_NET_NAME}' already exists"
 else
     echo "  Creating network '${PROVIDER_NET_NAME}'..."
-    if openstack network create \
+    if /usr/bin/openstack network create \
         --external \
         --share \
         --provider-physical-network "${PROVIDER_NETWORK_NAME}" \
@@ -152,7 +149,7 @@ fi
 # Verify network was created with correct settings
 echo ""
 echo "  Network details:"
-openstack network show "${PROVIDER_NET_NAME}" -f table -c name -c id -c status \
+/usr/bin/openstack network show "${PROVIDER_NET_NAME}" -f table -c name -c id -c status \
     -c provider:network_type -c provider:physical_network -c router:external 2>/dev/null || true
 
 # =============================================================================
@@ -162,29 +159,29 @@ echo ""
 echo "[3/4] Creating provider subnet..."
 
 # Check if subnet already exists
-if openstack subnet show "${PROVIDER_SUBNET_NAME}" &>/dev/null; then
+if /usr/bin/openstack subnet show "${PROVIDER_SUBNET_NAME}" &>/dev/null; then
     echo "  ✓ Provider subnet '${PROVIDER_SUBNET_NAME}' already exists"
 else
     echo "  Creating subnet '${PROVIDER_SUBNET_NAME}'..."
-    
+
     # Build subnet create command
-    SUBNET_CMD="openstack subnet create"
+    SUBNET_CMD="/usr/bin/openstack subnet create"
     SUBNET_CMD+=" --network ${PROVIDER_NET_NAME}"
     SUBNET_CMD+=" --subnet-range ${PROVIDER_SUBNET_RANGE}"
     SUBNET_CMD+=" --gateway ${PROVIDER_GATEWAY}"
     SUBNET_CMD+=" --dns-nameserver ${PROVIDER_DNS}"
-    
+
     if [ "$USE_OPENSTACK_DHCP" = "true" ]; then
         SUBNET_CMD+=" --dhcp"
         SUBNET_CMD+=" --allocation-pool start=${ALLOCATION_POOL_START},end=${ALLOCATION_POOL_END}"
-        echo "  Using OpenStack DHCP with pool: ${ALLOCATION_POOL_START} - ${ALLOCATION_POOL_END}"
+        echo "  Using OVN native DHCP with pool: ${ALLOCATION_POOL_START} - ${ALLOCATION_POOL_END}"
     else
         SUBNET_CMD+=" --no-dhcp"
         echo "  DHCP disabled - VMs will need static IPs or external DHCP"
     fi
-    
+
     SUBNET_CMD+=" ${PROVIDER_SUBNET_NAME}"
-    
+
     if eval $SUBNET_CMD; then
         echo "  ✓ Provider subnet created"
     else
@@ -196,7 +193,7 @@ fi
 # Verify subnet was created
 echo ""
 echo "  Subnet details:"
-openstack subnet show "${PROVIDER_SUBNET_NAME}" -f table -c name -c id -c cidr \
+/usr/bin/openstack subnet show "${PROVIDER_SUBNET_NAME}" -f table -c name -c id -c cidr \
     -c gateway_ip -c enable_dhcp -c allocation_pools -c dns_nameservers 2>/dev/null || true
 
 # =============================================================================
@@ -208,29 +205,31 @@ echo "[4/4] Verifying provider network..."
 # List networks
 echo ""
 echo "Networks:"
-openstack network list
+/usr/bin/openstack network list
 
 # List subnets
 echo ""
 echo "Subnets:"
-openstack subnet list
-
-# Check DHCP agent scheduling (if using OpenStack DHCP)
-if [ "$USE_OPENSTACK_DHCP" = "true" ]; then
-    echo ""
-    echo "DHCP Agent hosting this network:"
-    openstack network agent list --network "${PROVIDER_NET_NAME}" 2>/dev/null || \
-        echo "  (DHCP agent will be scheduled when first port is created)"
-fi
+/usr/bin/openstack subnet list
 
 # Verify network is external
-EXTERNAL=$(openstack network show "${PROVIDER_NET_NAME}" -f value -c router:external 2>/dev/null || echo "unknown")
+EXTERNAL=$(/usr/bin/openstack network show "${PROVIDER_NET_NAME}" -f value -c router:external 2>/dev/null || echo "unknown")
 if [ "$EXTERNAL" = "True" ]; then
     echo ""
     echo "  ✓ Network is marked as external (can be used as floating IP pool)"
 else
     echo ""
     echo "  ⚠ Network may not be marked as external"
+fi
+
+# Check OVN logical switch was created
+echo ""
+echo "OVN Logical Switches:"
+if sudo ovn-nbctl ls-list 2>/dev/null | /usr/bin/grep -i "neutron"; then
+    sudo ovn-nbctl ls-list 2>/dev/null | /usr/bin/grep -i "neutron" | head -5
+    echo "  ✓ OVN logical switch created for network"
+else
+    echo "  (OVN logical switch will be created when first port is attached)"
 fi
 
 # =============================================================================
@@ -245,13 +244,15 @@ else
 fi
 echo "=========================================="
 echo ""
+echo "Architecture: ML2/OVN (modern SDN)"
+echo ""
 echo "Network: ${PROVIDER_NET_NAME}"
 echo "Subnet:  ${PROVIDER_SUBNET_NAME}"
 echo "Range:   ${PROVIDER_SUBNET_RANGE}"
 echo "Gateway: ${PROVIDER_GATEWAY}"
 echo "DNS:     ${PROVIDER_DNS}"
 if [ "$USE_OPENSTACK_DHCP" = "true" ]; then
-    echo "DHCP:    Enabled (OpenStack)"
+    echo "DHCP:    Enabled (OVN native)"
     echo "Pool:    ${ALLOCATION_POOL_START} - ${ALLOCATION_POOL_END}"
 else
     echo "DHCP:    Disabled (use static or external DHCP)"
@@ -263,6 +264,8 @@ echo "Quick test commands:"
 echo "  openstack network list"
 echo "  openstack subnet list"
 echo "  openstack network show ${PROVIDER_NET_NAME}"
+echo "  sudo ovn-nbctl ls-list"
+echo "  sudo ovn-nbctl show"
 echo ""
 echo "Next: Run 29-cinder-db.sh (if using Cinder for block storage)"
 echo "  Or: Run 30-cirros-test.sh to test VM creation"
