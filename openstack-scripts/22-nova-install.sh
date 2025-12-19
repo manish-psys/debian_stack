@@ -156,11 +156,10 @@ echo "  ✓ dbconfig-common configured"
 echo ""
 echo "[2/8] Installing Nova packages..."
 
-export DEBIAN_FRONTEND=noninteractive
-
 # Debian Trixie has Nova in main repositories - no backports needed
 # Package version: 2:31.0.0-6+deb13u1 (OpenStack 2024.2 Dalmatian)
-sudo -E apt-get install -y \
+# Note: Use DEBIAN_FRONTEND inline instead of sudo -E to avoid permission issues
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold" \
     nova-api nova-conductor nova-scheduler nova-novncproxy nova-compute

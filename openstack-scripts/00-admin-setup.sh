@@ -67,6 +67,9 @@ if [ ! -f "$SUDOERS_FILE" ]; then
 # OpenStack Administrator sudo rules
 # Created by 00-admin-setup.sh
 
+# Allow environment preservation (for DEBIAN_FRONTEND=noninteractive etc.)
+Defaults:${TARGET_USER} env_keep += "DEBIAN_FRONTEND"
+
 # Allow OpenStack service management without password
 ${TARGET_USER} ALL=(ALL) NOPASSWD: /bin/systemctl start *
 ${TARGET_USER} ALL=(ALL) NOPASSWD: /bin/systemctl stop *
