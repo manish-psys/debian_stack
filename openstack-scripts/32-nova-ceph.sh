@@ -156,11 +156,13 @@ echo "[4/7] Configuring AppArmor for Ceph keyring access..."
 # LESSON LEARNED: AppArmor blocks libvirt/QEMU from accessing Ceph keyrings
 # Add local override to allow Ceph keyring access
 APPARMOR_LOCAL="/etc/apparmor.d/local/abstractions/libvirt-qemu"
-if [ -d /etc/apparmor.d/local ]; then
+if [ -d /etc/apparmor.d ]; then
     # Check if already configured (idempotent)
     if [ -f "$APPARMOR_LOCAL" ] && grep -q "/etc/ceph/\*\* r," "$APPARMOR_LOCAL" 2>/dev/null; then
         echo "  ✓ AppArmor local override already configured"
     else
+        # Create parent directory if it doesn't exist
+        sudo mkdir -p "$(dirname "$APPARMOR_LOCAL")"
         cat <<EOF | sudo tee "$APPARMOR_LOCAL" > /dev/null
 # Allow Ceph keyring access for OpenStack Nova
 /etc/ceph/** r,
@@ -175,7 +177,7 @@ EOF
         echo "  ✓ AppArmor reloaded"
     fi
 else
-    echo "  ⚠ AppArmor local directory not found (may not be installed)"
+    echo "  ⚠ AppArmor directory not found (may not be installed)"
 fi
 
 ###############################################################################
