@@ -268,6 +268,23 @@ sudo crudini --set /etc/nova/nova.conf cinder os_region_name "${REGION_NAME}"
 sudo crudini --set /etc/nova/nova.conf cinder catalog_info "volumev3:cinderv3:publicURL"
 echo "  ✓ [cinder] section configured"
 
+# --- [neutron] section (CRITICAL for VM networking) ---
+# LESSON LEARNED (2025-12-19): Nova MUST have [neutron] section configured to
+# communicate with Neutron for network port allocation. Without this, VM creation
+# fails with "Exhausted all hosts available" because the port binding fails.
+# This was previously only in 26-neutron-install.sh but Nova needs it at install time.
+sudo crudini --set /etc/nova/nova.conf neutron auth_url "${KEYSTONE_AUTH_URL}"
+sudo crudini --set /etc/nova/nova.conf neutron auth_type "password"
+sudo crudini --set /etc/nova/nova.conf neutron project_domain_name "Default"
+sudo crudini --set /etc/nova/nova.conf neutron user_domain_name "Default"
+sudo crudini --set /etc/nova/nova.conf neutron region_name "${REGION_NAME}"
+sudo crudini --set /etc/nova/nova.conf neutron project_name "service"
+sudo crudini --set /etc/nova/nova.conf neutron username "neutron"
+sudo crudini --set /etc/nova/nova.conf neutron password "${NEUTRON_PASS}"
+sudo crudini --set /etc/nova/nova.conf neutron service_metadata_proxy "true"
+sudo crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret "${METADATA_SECRET}"
+echo "  ✓ [neutron] section configured"
+
 # --- [oslo_messaging_rabbit] section ---
 # NOTE: Quorum queues (rabbit_quorum_queue=true) require a RabbitMQ cluster with
 # 3+ nodes for Raft consensus. For single-node deployments, do NOT enable quorum
