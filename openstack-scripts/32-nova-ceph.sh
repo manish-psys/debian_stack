@@ -2,32 +2,40 @@
 ###############################################################################
 # 32-nova-ceph.sh
 # Configure Nova to use Ceph for ephemeral disks and volume attachments
-# 
+# Idempotent - safe to run multiple times
+#
 # This script:
 # - Creates libvirt secret for Ceph authentication
 # - Configures Nova [libvirt] section for RBD
 # - Updates Cinder with consistent secret UUID
+# - Configures AppArmor for Ceph keyring access
 # - Enables live migration with Ceph
 #
 # Prerequisites:
+# - Script 29-31 completed (Cinder installed)
 # - Ceph cluster operational
 # - client.cinder user exists with appropriate permissions
 # - Nova and Cinder already installed and running
 ###############################################################################
 set -e
 
-# Source environment
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/openstack-env.sh" ]; then
-    source "$SCRIPT_DIR/openstack-env.sh"
-elif [ -f "./openstack-env.sh" ]; then
-    source "./openstack-env.sh"
+
+# =============================================================================
+# Source shared environment
+# =============================================================================
+if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
+    source "${SCRIPT_DIR}/openstack-env.sh"
 else
-    echo "ERROR: openstack-env.sh not found!"
+    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
     exit 1
 fi
 
 echo "=== Step 32: Nova + Ceph Integration ==="
+echo "Using Controller: ${CONTROLLER_IP}"
+echo "Using Nova Pool: ${CEPH_NOVA_POOL}"
+echo "Using Cinder Pool: ${CEPH_CINDER_POOL}"
+echo ""
 
 # Configuration
 NOVA_CONF="/etc/nova/nova.conf"
@@ -35,10 +43,13 @@ CINDER_CONF="/etc/cinder/cinder.conf"
 SECRET_NAME="client.cinder secret"
 CEPH_USER="cinder"
 
+# Error counter
+ERRORS=0
+
 ###############################################################################
-# [1/6] Prerequisites Check
+# [1/7] Prerequisites Check
 ###############################################################################
-echo "[1/6] Checking prerequisites..."
+echo "[1/7] Checking prerequisites..."
 
 # Check Nova is installed
 if ! dpkg -l | grep -q "nova-compute"; then
@@ -77,9 +88,10 @@ fi
 echo "  ✓ libvirtd running"
 
 ###############################################################################
-# [2/6] Create/Get Libvirt Secret
+# [2/7] Create/Get Libvirt Secret
 ###############################################################################
-echo "[2/6] Setting up libvirt secret for Ceph..."
+echo ""
+echo "[2/7] Setting up libvirt secret for Ceph..."
 
 # Check if secret already exists
 EXISTING_UUID=$(sudo virsh secret-list 2>/dev/null | grep "${SECRET_NAME}" | awk '{print $1}' || true)
@@ -100,7 +112,7 @@ EOF
     # Define secret
     SECRET_UUID=$(sudo virsh secret-define --file /tmp/ceph-secret.xml | awk '{print $2}' | tr -d '"')
     rm -f /tmp/ceph-secret.xml
-    
+
     if [ -z "$SECRET_UUID" ]; then
         echo "  ✗ ERROR: Failed to create libvirt secret!"
         exit 1
@@ -109,11 +121,12 @@ EOF
 fi
 
 ###############################################################################
-# [3/6] Set Secret Value
+# [3/7] Set Secret Value
 ###############################################################################
-echo "[3/6] Setting secret value from Ceph keyring..."
+echo ""
+echo "[3/7] Setting secret value from Ceph keyring..."
 
-# Get the key from Ceph
+# Get the key from Ceph (already base64 encoded)
 CEPH_KEY=$(sudo ceph auth get-key client.${CEPH_USER})
 
 if [ -z "$CEPH_KEY" ]; then
@@ -122,7 +135,8 @@ if [ -z "$CEPH_KEY" ]; then
 fi
 
 # Set the secret value
-sudo virsh secret-set-value --secret "${SECRET_UUID}" --base64 "$(echo -n "${CEPH_KEY}" | base64)"
+# NOTE: CEPH_KEY is already base64 encoded, pass directly with --base64
+sudo virsh secret-set-value --secret "${SECRET_UUID}" --base64 "${CEPH_KEY}"
 echo "  ✓ Secret value set"
 
 # Verify secret
@@ -136,17 +150,24 @@ fi
 ###############################################################################
 # [4/7] Configure AppArmor for Ceph Keyring Access
 ###############################################################################
+echo ""
 echo "[4/7] Configuring AppArmor for Ceph keyring access..."
 
 # LESSON LEARNED: AppArmor blocks libvirt/QEMU from accessing Ceph keyrings
 # Add local override to allow Ceph keyring access
+APPARMOR_LOCAL="/etc/apparmor.d/local/abstractions/libvirt-qemu"
 if [ -d /etc/apparmor.d/local ]; then
-    cat <<EOF | sudo tee /etc/apparmor.d/local/abstractions/libvirt-qemu > /dev/null
+    # Check if already configured (idempotent)
+    if [ -f "$APPARMOR_LOCAL" ] && grep -q "/etc/ceph/\*\* r," "$APPARMOR_LOCAL" 2>/dev/null; then
+        echo "  ✓ AppArmor local override already configured"
+    else
+        cat <<EOF | sudo tee "$APPARMOR_LOCAL" > /dev/null
 # Allow Ceph keyring access for OpenStack Nova
 /etc/ceph/** r,
 /etc/ceph/ceph.client.*.keyring r,
 EOF
-    echo "  ✓ AppArmor local override created"
+        echo "  ✓ AppArmor local override created"
+    fi
 
     # Reload AppArmor if running
     if systemctl is-active --quiet apparmor; then
@@ -160,13 +181,19 @@ fi
 ###############################################################################
 # [5/7] Add libvirt-qemu User to Cinder Group
 ###############################################################################
+echo ""
 echo "[5/7] Adding libvirt-qemu to cinder group..."
 
 # LESSON LEARNED: libvirt-qemu user needs read access to Ceph keyrings
 # Keyrings are owned by ceph:cinder with mode 640
 if getent group cinder &>/dev/null; then
-    sudo usermod -aG cinder libvirt-qemu 2>/dev/null || true
-    echo "  ✓ libvirt-qemu added to cinder group"
+    # Check if already in group (idempotent)
+    if id -nG libvirt-qemu 2>/dev/null | grep -qw cinder; then
+        echo "  ✓ libvirt-qemu already in cinder group"
+    else
+        sudo usermod -aG cinder libvirt-qemu
+        echo "  ✓ libvirt-qemu added to cinder group"
+    fi
 else
     echo "  ⚠ cinder group not found - will be created when Cinder is installed"
 fi
@@ -174,10 +201,15 @@ fi
 ###############################################################################
 # [6/7] Configure Nova for Ceph
 ###############################################################################
+echo ""
 echo "[6/7] Configuring Nova [libvirt] section..."
 
-# Backup current config
-sudo cp "$NOVA_CONF" "${NOVA_CONF}.pre-ceph.$(date +%Y%m%d_%H%M%S)"
+# Backup current config (only if not already backed up today)
+BACKUP_FILE="${NOVA_CONF}.pre-ceph.$(date +%Y%m%d)"
+if [ ! -f "$BACKUP_FILE" ]; then
+    sudo cp "$NOVA_CONF" "$BACKUP_FILE"
+    echo "  ✓ Backup created: $BACKUP_FILE"
+fi
 
 # Configure libvirt section for Ceph RBD
 sudo crudini --set "$NOVA_CONF" libvirt images_type rbd
@@ -187,7 +219,8 @@ sudo crudini --set "$NOVA_CONF" libvirt rbd_user "${CEPH_USER}"
 sudo crudini --set "$NOVA_CONF" libvirt rbd_secret_uuid "${SECRET_UUID}"
 
 # Enable live migration with Ceph (no need to copy disk)
-sudo crudini --set "$NOVA_CONF" libvirt live_migration_flag "VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE"
+# Note: live_migration_tunnelled is preferred for newer libvirt
+sudo crudini --set "$NOVA_CONF" libvirt live_migration_tunnelled "true"
 
 # Inject password disabled (Ceph doesn't support it)
 sudo crudini --set "$NOVA_CONF" libvirt inject_password false
@@ -206,6 +239,7 @@ echo "    rbd_secret_uuid: $(sudo crudini --get "$NOVA_CONF" libvirt rbd_secret_
 ###############################################################################
 # [7/7] Update Cinder Secret UUID
 ###############################################################################
+echo ""
 echo "[7/7] Updating Cinder with consistent secret UUID..."
 
 # Ensure Cinder uses same secret UUID
@@ -226,7 +260,7 @@ if systemctl is-active --quiet nova-compute; then
 else
     echo "  ✗ ERROR: nova-compute failed to start!"
     sudo journalctl -u nova-compute --no-pager -n 20
-    exit 1
+    ERRORS=$((ERRORS+1))
 fi
 
 # Restart Cinder volume
@@ -237,20 +271,21 @@ if systemctl is-active --quiet cinder-volume; then
 else
     echo "  ✗ ERROR: cinder-volume failed to start!"
     sudo journalctl -u cinder-volume --no-pager -n 20
-    exit 1
+    ERRORS=$((ERRORS+1))
 fi
 
 ###############################################################################
 # Verification
 ###############################################################################
 echo ""
-echo "Verifying configuration..."
+echo "[Verification] Checking final state..."
 
 # Check Nova compute is up
 if systemctl is-active --quiet nova-compute; then
     echo "  ✓ nova-compute running"
 else
     echo "  ✗ nova-compute not running"
+    ERRORS=$((ERRORS+1))
 fi
 
 # Check Cinder volume is up
@@ -258,6 +293,7 @@ if systemctl is-active --quiet cinder-volume; then
     echo "  ✓ cinder-volume running"
 else
     echo "  ✗ cinder-volume not running"
+    ERRORS=$((ERRORS+1))
 fi
 
 # Verify libvirt secret
@@ -265,9 +301,16 @@ echo ""
 echo "Libvirt secret:"
 sudo virsh secret-list | grep -E "UUID|${SECRET_NAME}" || true
 
+###############################################################################
+# Summary
+###############################################################################
 echo ""
 echo "=========================================="
-echo "=== Nova-Ceph Integration Complete ==="
+if [ $ERRORS -eq 0 ]; then
+    echo "=== Nova-Ceph Integration Complete ==="
+else
+    echo "=== Nova-Ceph Integration Completed with $ERRORS Error(s) ==="
+fi
 echo "=========================================="
 echo ""
 echo "Configuration summary:"
