@@ -2,7 +2,8 @@
 ###############################################################################
 # 29-cinder-db.sh
 # Create Cinder database and Keystone entities for Block Storage service
-# 
+# Idempotent - safe to run multiple times
+#
 # Prerequisites:
 #   - MariaDB running (script 13)
 #   - Keystone configured (script 15-16)
@@ -15,33 +16,17 @@
 #   - Keystone service 'cinderv3' (volumev3)
 #   - Keystone endpoints (public, internal, admin)
 ###############################################################################
+set -e
 
-# Exit on undefined variables only - we handle errors manually
-set -u
-
-# =============================================================================
-# LOAD ENVIRONMENT
-# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/openstack-env.sh"
 
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE="${SCRIPT_DIR}/../openstack-env.sh"
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE=~/openstack-env.sh
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE=/mnt/user-data/outputs/openstack-env.sh
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
+# =============================================================================
+# Source shared environment
+# =============================================================================
+if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
+    source "${SCRIPT_DIR}/openstack-env.sh"
 else
-    echo "ERROR: openstack-env.sh not found!"
-    echo "Please ensure the environment file exists."
+    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
     exit 1
 fi
 
@@ -49,9 +34,6 @@ echo "=== Step 29: Cinder Database and Keystone Setup ==="
 echo "Using Controller: ${CONTROLLER_IP}"
 echo "Using Region: ${REGION_NAME}"
 echo ""
-
-# Error counter
-ERRORS=0
 
 # =============================================================================
 # PART 1: Check Prerequisites
@@ -77,7 +59,7 @@ echo "  ✓ admin-openrc exists"
 source ~/admin-openrc
 
 # Test Keystone connectivity
-if ! openstack token issue &>/dev/null; then
+if ! /usr/bin/openstack token issue &>/dev/null; then
     echo "  ✗ ERROR: Cannot connect to Keystone!"
     exit 1
 fi
@@ -96,42 +78,8 @@ echo "  ✓ RabbitMQ is running"
 echo ""
 echo "[2/5] Creating Cinder database..."
 
-# Check if database already exists
-DB_EXISTS=$(sudo mysql -u root -e "SHOW DATABASES LIKE 'cinder';" 2>/dev/null | grep -c cinder || true)
-
-if [ "$DB_EXISTS" -gt 0 ]; then
-    echo "  ✓ Database 'cinder' already exists"
-else
-    echo "  Creating database 'cinder'..."
-    sudo mysql -u root <<EOF
-CREATE DATABASE cinder;
-EOF
-    if [ $? -eq 0 ]; then
-        echo "  ✓ Database 'cinder' created"
-    else
-        echo "  ✗ ERROR: Failed to create database!"
-        ((ERRORS++))
-    fi
-fi
-
-# Create/update MySQL user
-echo "  Configuring MySQL user 'cinder'..."
-sudo mysql -u root <<EOF
-CREATE USER IF NOT EXISTS 'cinder'@'localhost' IDENTIFIED BY '${CINDER_DB_PASS}';
-CREATE USER IF NOT EXISTS 'cinder'@'%' IDENTIFIED BY '${CINDER_DB_PASS}';
-GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'localhost';
-GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'%';
-ALTER USER 'cinder'@'localhost' IDENTIFIED BY '${CINDER_DB_PASS}';
-ALTER USER 'cinder'@'%' IDENTIFIED BY '${CINDER_DB_PASS}';
-FLUSH PRIVILEGES;
-EOF
-
-if [ $? -eq 0 ]; then
-    echo "  ✓ MySQL user 'cinder' configured"
-else
-    echo "  ✗ ERROR: Failed to configure MySQL user!"
-    ((ERRORS++))
-fi
+# Use helper function from openstack-env.sh
+create_service_database "cinder" "cinder" "${CINDER_DB_PASS}"
 
 # Test database connection
 echo "  Testing database connection..."
@@ -139,7 +87,7 @@ if mysql -u cinder -p"${CINDER_DB_PASS}" -e "SELECT 1;" cinder &>/dev/null; then
     echo "  ✓ Database connection successful"
 else
     echo "  ✗ ERROR: Cannot connect to database as 'cinder' user!"
-    ((ERRORS++))
+    exit 1
 fi
 
 # =============================================================================
@@ -149,26 +97,18 @@ echo ""
 echo "[3/5] Creating Keystone user 'cinder'..."
 
 # Check if user already exists
-if openstack user show cinder &>/dev/null; then
+if /usr/bin/openstack user show cinder &>/dev/null; then
     echo "  ✓ User 'cinder' already exists"
 else
     echo "  Creating user 'cinder'..."
-    if openstack user create --domain default --password "${CINDER_PASS}" cinder &>/dev/null; then
-        echo "  ✓ User 'cinder' created"
-    else
-        echo "  ✗ ERROR: Failed to create user!"
-        ((ERRORS++))
-    fi
+    /usr/bin/openstack user create --domain default --password "${CINDER_PASS}" cinder
+    echo "  ✓ User 'cinder' created"
 fi
 
 # Add admin role to cinder user
 echo "  Adding 'admin' role to 'cinder' user..."
-if openstack role add --project service --user cinder admin 2>/dev/null; then
-    echo "  ✓ Role 'admin' added to user 'cinder'"
-else
-    # Role might already be assigned
-    echo "  ✓ Role 'admin' already assigned (or added)"
-fi
+/usr/bin/openstack role add --project service --user cinder admin 2>/dev/null || true
+echo "  ✓ Role 'admin' assigned to user 'cinder'"
 
 # =============================================================================
 # PART 4: Create Cinder Service and Endpoints
@@ -180,37 +120,29 @@ echo "[4/5] Creating Cinder service and endpoints..."
 # Note: Cinder v2 is deprecated, we only create v3
 
 # Check if service exists
-if openstack service show cinderv3 &>/dev/null; then
+if /usr/bin/openstack service show cinderv3 &>/dev/null; then
     echo "  ✓ Service 'cinderv3' already exists"
 else
     echo "  Creating service 'cinderv3'..."
-    if openstack service create --name cinderv3 \
-        --description "OpenStack Block Storage v3" volumev3 &>/dev/null; then
-        echo "  ✓ Service 'cinderv3' created"
-    else
-        echo "  ✗ ERROR: Failed to create service!"
-        ((ERRORS++))
-    fi
+    /usr/bin/openstack service create --name cinderv3 \
+        --description "OpenStack Block Storage v3" volumev3
+    echo "  ✓ Service 'cinderv3' created"
 fi
 
 # Create endpoints
 # Cinder v3 uses /v3/%(project_id)s path
 CINDER_URL="http://${CONTROLLER_IP}:8776/v3/%(project_id)s"
 
-EXISTING_ENDPOINTS=$(openstack endpoint list --service cinderv3 -f value -c Interface 2>/dev/null || true)
+EXISTING_ENDPOINTS=$(/usr/bin/openstack endpoint list --service cinderv3 -f value -c Interface 2>/dev/null || true)
 
 for INTERFACE in public internal admin; do
-    if echo "$EXISTING_ENDPOINTS" | grep -q "^${INTERFACE}$"; then
+    if echo "$EXISTING_ENDPOINTS" | /usr/bin/grep -q "^${INTERFACE}$"; then
         echo "  ✓ ${INTERFACE} endpoint already exists"
     else
         echo "  Creating ${INTERFACE} endpoint..."
-        if openstack endpoint create --region "${REGION_NAME}" \
-            volumev3 ${INTERFACE} "${CINDER_URL}" &>/dev/null; then
-            echo "  ✓ ${INTERFACE} endpoint created"
-        else
-            echo "  ✗ ERROR: Failed to create ${INTERFACE} endpoint!"
-            ((ERRORS++))
-        fi
+        /usr/bin/openstack endpoint create --region "${REGION_NAME}" \
+            volumev3 ${INTERFACE} "${CINDER_URL}"
+        echo "  ✓ ${INTERFACE} endpoint created"
     fi
 done
 
@@ -219,6 +151,8 @@ done
 # =============================================================================
 echo ""
 echo "[5/5] Verifying Cinder setup..."
+
+ERRORS=0
 
 # Verify database
 echo ""
@@ -229,17 +163,24 @@ echo "  Tables in 'cinder' database: ${TABLES} (will be populated after db sync)
 # Verify Keystone user
 echo ""
 echo "Keystone user:"
-openstack user show cinder -f table -c name -c domain_id -c enabled 2>/dev/null || echo "  ✗ User not found"
+/usr/bin/openstack user show cinder -f table -c name -c domain_id -c enabled 2>/dev/null || { echo "  ✗ User not found"; ERRORS=$((ERRORS+1)); }
 
 # Verify service
 echo ""
 echo "Cinder service:"
-openstack service show cinderv3 -f table -c name -c type -c enabled 2>/dev/null || echo "  ✗ Service not found"
+/usr/bin/openstack service show cinderv3 -f table -c name -c type -c enabled 2>/dev/null || { echo "  ✗ Service not found"; ERRORS=$((ERRORS+1)); }
 
 # Verify endpoints
 echo ""
 echo "Cinder endpoints:"
-openstack endpoint list --service cinderv3 -f table -c "Service Name" -c "Service Type" -c Interface -c URL 2>/dev/null || echo "  ✗ No endpoints found"
+ENDPOINT_COUNT=$(/usr/bin/openstack endpoint list --service cinderv3 -f value 2>/dev/null | wc -l)
+if [ "$ENDPOINT_COUNT" -ge 3 ]; then
+    /usr/bin/openstack endpoint list --service cinderv3 -f table -c "Service Name" -c "Service Type" -c Interface -c URL
+    echo "  ✓ All 3 endpoints registered"
+else
+    echo "  ✗ Expected 3 endpoints, found ${ENDPOINT_COUNT}"
+    ERRORS=$((ERRORS+1))
+fi
 
 # =============================================================================
 # SUMMARY
@@ -256,14 +197,8 @@ echo ""
 echo "Configuration summary:"
 echo "  Database: cinder"
 echo "  DB User: cinder"
-echo "  DB Password: ${CINDER_DB_PASS}"
 echo "  Keystone User: cinder"
-echo "  Keystone Password: ${CINDER_PASS}"
 echo "  Service: cinderv3 (volumev3)"
 echo "  API Port: 8776"
-echo ""
-echo "Credentials stored in: openstack-env.sh"
-echo "  CINDER_DB_PASS=${CINDER_DB_PASS}"
-echo "  CINDER_PASS=${CINDER_PASS}"
 echo ""
 echo "Next: Run 30-cinder-install.sh"

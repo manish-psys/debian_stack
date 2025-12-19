@@ -2,6 +2,7 @@
 ###############################################################################
 # 30-cinder-install.sh
 # Install and configure Cinder (Block Storage) with Ceph backend
+# Idempotent - safe to run multiple times
 #
 # Prerequisites:
 #   - Script 29 completed (database and Keystone setup)
@@ -14,33 +15,17 @@
 #   - Sets up Ceph authentication for Cinder
 #   - Does NOT sync database or start services (see script 31)
 ###############################################################################
+set -e
 
-# Exit on undefined variables only - we handle errors manually
-set -u
-
-# =============================================================================
-# LOAD ENVIRONMENT
-# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/openstack-env.sh"
 
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE="${SCRIPT_DIR}/../openstack-env.sh"
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE=~/openstack-env.sh
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE=/mnt/user-data/outputs/openstack-env.sh
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
+# =============================================================================
+# Source shared environment
+# =============================================================================
+if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
+    source "${SCRIPT_DIR}/openstack-env.sh"
 else
-    echo "ERROR: openstack-env.sh not found!"
-    echo "Please ensure the environment file exists."
+    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
     exit 1
 fi
 
@@ -82,7 +67,7 @@ fi
 echo "  ✓ Cinder database accessible"
 
 # Check Keystone user exists
-if ! openstack user show cinder &>/dev/null; then
+if ! /usr/bin/openstack user show cinder &>/dev/null; then
     echo "  ✗ ERROR: Keystone user 'cinder' not found!"
     echo "  Run 29-cinder-db.sh first."
     exit 1
@@ -90,7 +75,7 @@ fi
 echo "  ✓ Keystone user 'cinder' exists"
 
 # Check Cinder service registered
-if ! openstack service show cinderv3 &>/dev/null; then
+if ! /usr/bin/openstack service show cinderv3 &>/dev/null; then
     echo "  ✗ ERROR: Service 'cinderv3' not found!"
     echo "  Run 29-cinder-db.sh first."
     exit 1
@@ -153,9 +138,8 @@ echo "  ✓ dbconfig-common configured"
 echo ""
 echo "[2/8] Installing Cinder packages..."
 
-# Install from Wallaby backports
+# Install from Debian Trixie native packages (Cinder 2:26.0.0-2 Caracal)
 sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-    -t bullseye-wallaby-backports \
     cinder-api \
     cinder-scheduler \
     cinder-volume \
@@ -165,7 +149,7 @@ if [ $? -eq 0 ]; then
     echo "  ✓ Cinder packages installed"
 else
     echo "  ✗ ERROR: Failed to install Cinder packages!"
-    ((ERRORS++))
+    ERRORS=$((ERRORS+1))
 fi
 
 # Verify installation
@@ -209,8 +193,6 @@ echo ""
 echo "[5/8] Configuring cinder.conf..."
 
 # [database] section
-# NOTE: Using localhost for database connection (same as other OpenStack services)
-# MariaDB listens on 127.0.0.1 by default, not on external IP
 echo "  Configuring [database]..."
 sudo crudini --set "$CINDER_CONF" database connection \
     "mysql+pymysql://cinder:${CINDER_DB_PASS}@localhost/cinder"
@@ -230,22 +212,9 @@ sudo crudini --set "$CINDER_CONF" DEFAULT volume_clear "none"
 sudo crudini --set "$CINDER_CONF" DEFAULT default_volume_type "ceph"
 echo "  ✓ [DEFAULT] configured"
 
-# [keystone_authtoken] section - use helper function if available, else manual
+# [keystone_authtoken] section - use helper function from openstack-env.sh
 echo "  Configuring [keystone_authtoken]..."
-if type configure_keystone_authtoken &>/dev/null; then
-    configure_keystone_authtoken "$CINDER_CONF" "cinder" "${CINDER_PASS}"
-else
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken www_authenticate_uri "http://${CONTROLLER_IP}:5000"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken auth_url "http://${CONTROLLER_IP}:5000"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken memcached_servers "localhost:11211"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken auth_type "password"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken project_domain_name "Default"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken user_domain_name "Default"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken project_name "service"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken username "cinder"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken password "${CINDER_PASS}"
-    sudo crudini --set "$CINDER_CONF" keystone_authtoken region_name "${REGION_NAME}"
-fi
+configure_keystone_authtoken "$CINDER_CONF" "cinder" "${CINDER_PASS}"
 echo "  ✓ [keystone_authtoken] configured"
 
 # [oslo_concurrency] section
@@ -291,7 +260,7 @@ CEPH_KEYRING="/etc/ceph/ceph.client.cinder.keyring"
 # Check if Ceph cinder keyring exists
 if [ -f "$CEPH_KEYRING" ]; then
     echo "  ✓ Ceph keyring exists: ${CEPH_KEYRING}"
-    
+
     # Ensure cinder user can read the keyring
     sudo chown ceph:cinder "$CEPH_KEYRING" 2>/dev/null || \
         sudo chown root:cinder "$CEPH_KEYRING"
@@ -301,7 +270,7 @@ else
     echo "  ⚠ WARNING: Ceph keyring not found: ${CEPH_KEYRING}"
     echo "  You may need to create a Ceph user for Cinder:"
     echo "    sudo ceph auth get-or-create client.cinder mon 'profile rbd' osd 'profile rbd pool=${CEPH_CINDER_POOL}, profile rbd pool=${CEPH_NOVA_POOL}' -o ${CEPH_KEYRING}"
-    ((ERRORS++))
+    ERRORS=$((ERRORS+1))
 fi
 
 # Also check for images pool access (for volume from image)
@@ -322,7 +291,7 @@ if sudo crudini --get "$CINDER_CONF" database connection &>/dev/null; then
     echo "  ✓ Configuration file syntax OK"
 else
     echo "  ✗ ERROR: Configuration file has syntax errors!"
-    ((ERRORS++))
+    ERRORS=$((ERRORS+1))
 fi
 
 # Show key configuration values

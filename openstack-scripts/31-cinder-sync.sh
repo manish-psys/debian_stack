@@ -2,6 +2,7 @@
 ###############################################################################
 # 31-cinder-sync.sh
 # Sync Cinder database and start services
+# Idempotent - safe to run multiple times
 #
 # Prerequisites:
 #   - Script 29 completed (database setup)
@@ -13,32 +14,17 @@
 #   - Starts and enables all Cinder services
 #   - Verifies everything is working
 ###############################################################################
+set -e
 
-# Exit on undefined variables only
-set -u
-
-# =============================================================================
-# LOAD ENVIRONMENT
-# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/openstack-env.sh"
 
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE="${SCRIPT_DIR}/../openstack-env.sh"
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE=~/openstack-env.sh
-fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    ENV_FILE=/mnt/user-data/outputs/openstack-env.sh
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
+# =============================================================================
+# Source shared environment
+# =============================================================================
+if [ -f "${SCRIPT_DIR}/openstack-env.sh" ]; then
+    source "${SCRIPT_DIR}/openstack-env.sh"
 else
-    echo "ERROR: openstack-env.sh not found!"
+    echo "ERROR: openstack-env.sh not found in ${SCRIPT_DIR}"
     exit 1
 fi
 
@@ -90,18 +76,16 @@ echo ""
 echo "[2/5] Syncing Cinder database..."
 
 # Run database migration
-sudo -u cinder cinder-manage db sync 2>&1 | grep -v "^$" | head -20
-
-if [ ${PIPESTATUS[0]} -eq 0 ]; then
-    echo "  OK"
-else
-    echo "  ✗ ERROR: Database sync failed!"
-    ((ERRORS++))
-fi
+sudo -u cinder cinder-manage db sync 2>&1 | grep -v "^$" | head -20 || true
 
 # Count tables
 TABLE_COUNT=$(mysql -u cinder -p"${CINDER_DB_PASS}" -N -e "SHOW TABLES;" cinder 2>/dev/null | wc -l)
-echo "  ✓ Database synced (${TABLE_COUNT} tables)"
+if [ "$TABLE_COUNT" -gt 0 ]; then
+    echo "  ✓ Database synced (${TABLE_COUNT} tables)"
+else
+    echo "  ✗ ERROR: Database sync may have failed (0 tables)"
+    ERRORS=$((ERRORS+1))
+fi
 
 # =============================================================================
 # PART 3: Start Cinder Services
@@ -118,25 +102,19 @@ CINDER_SERVICES=(
 
 for SERVICE in "${CINDER_SERVICES[@]}"; do
     echo "  Starting ${SERVICE}..."
-    
+
     # Enable and start service
-    if sudo systemctl enable --now ${SERVICE} 2>&1 | grep -v "^$"; then
-        # Check if it's actually running
-        sleep 2
-        if systemctl is-active --quiet ${SERVICE}; then
-            echo "  ✓ ${SERVICE} started"
-        else
-            echo "  ✗ ${SERVICE} failed to start"
-            echo "    Check: sudo journalctl -u ${SERVICE} -n 50"
-            ((ERRORS++))
-        fi
+    sudo systemctl enable ${SERVICE} 2>/dev/null || true
+    sudo systemctl start ${SERVICE} 2>/dev/null || true
+
+    # Check if it's actually running
+    sleep 2
+    if systemctl is-active --quiet ${SERVICE}; then
+        echo "  ✓ ${SERVICE} started"
     else
-        if systemctl is-active --quiet ${SERVICE}; then
-            echo "  ✓ ${SERVICE} started"
-        else
-            echo "  ✗ ${SERVICE} failed to start"
-            ((ERRORS++))
-        fi
+        echo "  ✗ ${SERVICE} failed to start"
+        echo "    Check: sudo journalctl -u ${SERVICE} -n 50"
+        ERRORS=$((ERRORS+1))
     fi
 done
 
@@ -149,32 +127,32 @@ echo "[4/5] Creating default volume type..."
 # Wait for API to be ready
 echo "  Waiting for Cinder API..."
 for i in {1..30}; do
-    if openstack volume type list &>/dev/null; then
+    if /usr/bin/openstack volume type list &>/dev/null; then
         echo "  ✓ Cinder API responding"
         break
     fi
     if [ $i -eq 30 ]; then
         echo "  ✗ ERROR: Cinder API not responding after 30 seconds!"
-        ((ERRORS++))
+        ERRORS=$((ERRORS+1))
     fi
     sleep 1
 done
 
 # Create 'ceph' volume type if it doesn't exist
-if openstack volume type show ceph &>/dev/null; then
+if /usr/bin/openstack volume type show ceph &>/dev/null; then
     echo "  ✓ Volume type 'ceph' already exists"
 else
     echo "  Creating volume type 'ceph'..."
-    if openstack volume type create --property volume_backend_name=ceph ceph &>/dev/null; then
+    if /usr/bin/openstack volume type create --property volume_backend_name=ceph ceph &>/dev/null; then
         echo "  ✓ Volume type 'ceph' created"
     else
         echo "  ✗ ERROR: Failed to create volume type!"
-        ((ERRORS++))
+        ERRORS=$((ERRORS+1))
     fi
 fi
 
 # Set as default
-openstack volume type set --property volume_backend_name=ceph ceph 2>/dev/null || true
+/usr/bin/openstack volume type set --property volume_backend_name=ceph ceph 2>/dev/null || true
 
 # =============================================================================
 # PART 5: Verification
@@ -194,7 +172,7 @@ for SERVICE in "${CINDER_SERVICES[@]}"; do
         echo "  ✓ ${SERVICE} is running"
     else
         echo "  ✗ ${SERVICE} is NOT running"
-        ((ERRORS++))
+        ERRORS=$((ERRORS+1))
     fi
 done
 
@@ -203,27 +181,27 @@ if sudo ss -tlnp | grep -q ":8776"; then
     echo "  ✓ Cinder API listening on port 8776"
 else
     echo "  ✗ Cinder API NOT listening on port 8776"
-    ((ERRORS++))
+    ERRORS=$((ERRORS+1))
 fi
 
 # Cinder service list (shows scheduler and volume services)
 echo ""
 echo "Cinder Services:"
-openstack volume service list 2>/dev/null || echo "  (waiting for services to register...)"
+/usr/bin/openstack volume service list 2>/dev/null || echo "  (waiting for services to register...)"
 
 # Volume types
 echo ""
 echo "Volume Types:"
-openstack volume type list 2>/dev/null || echo "  (no volume types)"
+/usr/bin/openstack volume type list 2>/dev/null || echo "  (no volume types)"
 
 # Test API
 echo ""
 echo "Testing Cinder API..."
-if openstack volume list &>/dev/null; then
+if /usr/bin/openstack volume list &>/dev/null; then
     echo "  ✓ Cinder API responding to CLI"
 else
     echo "  ✗ Cinder API not responding"
-    ((ERRORS++))
+    ERRORS=$((ERRORS+1))
 fi
 
 # Ceph pool stats

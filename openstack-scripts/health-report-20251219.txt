@@ -1,0 +1,193 @@
+===============================================================================
+OPENSTACK HEALTH REPORT
+Generated: 2025-12-19
+Server: osctl1 (192.168.2.9)
+===============================================================================
+
+===============================================================================
+EXECUTIVE SUMMARY
+===============================================================================
+Status: ✓ ALL SYSTEMS OPERATIONAL
+
+All OpenStack services are running and responding correctly after reboot.
+The OVN socket permissions fix was applied by re-running script 25.
+
+===============================================================================
+INFRASTRUCTURE SERVICES
+===============================================================================
+Service                        Status          Port
+------------------------------  --------------  ----
+MariaDB                        ✓ active        3306
+RabbitMQ                       ✓ active        5672
+Memcached                      ✓ active        11211
+etcd                           ✓ active        2379
+
+===============================================================================
+OPENSTACK SERVICES
+===============================================================================
+Service                        Status
+------------------------------  --------------
+keystone                       ✓ active
+apache2                        ✓ active
+glance-api                     ✓ active
+placement-api                  ✓ active
+nova-api                       ✓ active
+nova-conductor                 ✓ active
+nova-scheduler                 ✓ active
+nova-compute                   ✓ active
+neutron-api                    ✓ active
+neutron-rpc-server             ✓ active
+neutron-ovn-metadata-agent     ✓ active
+
+===============================================================================
+OVS/OVN SERVICES
+===============================================================================
+Service                        Status
+------------------------------  --------------
+openvswitch-switch             ✓ active
+ovn-central                    ✓ active
+ovn-host                       ✓ active
+
+OVN Socket Permissions:        ✓ 777 (Neutron accessible)
+Systemd Override:              ✓ Installed (persistent across reboots)
+
+===============================================================================
+API ENDPOINTS (HTTP Response Codes)
+===============================================================================
+Service          Port    URL                           Status
+---------------  ------  ----------------------------  ------
+Keystone         5000    http://192.168.2.9:5000/v3    ✓ 200
+Glance           9292    http://192.168.2.9:9292/      ✓ 300
+Placement        8778    http://192.168.2.9:8778/      ✓ 200
+Nova API         8774    http://192.168.2.9:8774/      ✓ 200
+Nova Metadata    8775    http://192.168.2.9:8775/      listening
+Nova VNC         6080    http://192.168.2.9:6080/      listening
+Neutron          9696    http://192.168.2.9:9696/      ✓ 200
+
+===============================================================================
+KEYSTONE REGISTERED ENDPOINTS
+===============================================================================
+Service          Type        Interfaces
+---------------  ----------  ------------------------------------------
+keystone         identity    public, internal, admin (:5000)
+glance           image       public, internal, admin (:9292)
+placement        placement   public, internal, admin (:8778)
+nova             compute     public, internal, admin (:8774)
+neutron          network     public, internal, admin (:9696)
+
+===============================================================================
+DATABASE CONNECTIVITY
+===============================================================================
+Database         Tables    Status
+---------------  --------  ------
+keystone         49        ✓ Connected
+glance           16        ✓ Connected
+nova             111       ✓ Connected
+neutron          135       ✓ Connected
+
+===============================================================================
+NOVA SERVICES
+===============================================================================
+Binary           Host      Zone      Status    State
+---------------  --------  --------  --------  -----
+nova-scheduler   osctl1    internal  enabled   ✓ up
+nova-conductor   osctl1    internal  enabled   ✓ up
+nova-compute     osctl1    nova      enabled   ✓ up
+
+===============================================================================
+NOVA HYPERVISORS
+===============================================================================
+Hostname         Type      Host IP       State
+---------------  --------  ------------  -----
+osctl1           QEMU      192.168.2.9   ✓ up
+
+===============================================================================
+PLACEMENT RESOURCE PROVIDERS
+===============================================================================
+Name             Status
+---------------  ------
+osctl1           ✓ registered
+
+===============================================================================
+NEUTRON AGENTS
+===============================================================================
+Agent Type            Host      Status    State
+--------------------  --------  --------  -----
+OVN Metadata agent    osctl1    :-)       ✓ UP
+OVN Controller agent  osctl1    :-)       ✓ UP
+
+===============================================================================
+NETWORKS
+===============================================================================
+Name             Type      Subnet           DHCP Pool
+---------------  --------  ---------------  -------------------------
+provider-net     flat      192.168.2.0/24   192.168.2.100-199
+
+===============================================================================
+OVN CONFIGURATION
+===============================================================================
+OVN Version:           25.03.0
+OVS Version:           3.5.0
+Encapsulation:         geneve
+Encap IP:              192.168.2.9
+Bridge Mapping:        physnet1 -> br-provider
+Chassis Registered:    ✓ osctl1
+
+Logical Switches:
+- neutron-0e2c154d... (provider-net)
+  - provnet port (localnet)
+  - DHCP port (192.168.2.100)
+
+===============================================================================
+SCRIPTS EXECUTED (1-28)
+===============================================================================
+✓ 01 - Base preparation
+✓ 02 - Hostname setup
+✓ ... (base infrastructure)
+✓ 15 - Keystone install
+✓ 16 - Keystone sync
+✓ 17 - Glance DB
+✓ 18 - Glance install
+✓ 19 - Glance sync
+✓ 20 - Placement DB
+✓ 21 - Placement install
+✓ 22 - Nova DB
+✓ 23 - Nova install
+✓ 24 - Neutron DB
+✓ 25 - OVS/OVN install (re-run to apply socket fix)
+✓ 26 - Neutron install
+✓ 27 - Neutron sync
+✓ 28 - Provider network
+
+===============================================================================
+PENDING SCRIPTS (29+)
+===============================================================================
+- 29 - Cinder (block storage) - optional
+- 30 - Cirros test (VM creation test)
+- Additional scripts as needed
+
+===============================================================================
+KNOWN ISSUES RESOLVED
+===============================================================================
+1. OVN Socket Permissions (Issue 7.1)
+   - Fix: systemd override in /etc/systemd/system/ovn-central.service.d/
+   - Status: ✓ Permanently fixed
+
+2. OVN fail_mode:secure (Issue 7.2)
+   - Fix: NORMAL flow rule on br-provider in script 26
+   - Status: ✓ Applied
+
+3. Debian Trixie Neutron Service Names (Issue 7.3)
+   - Fix: Using neutron-api + neutron-rpc-server
+   - Status: ✓ Correct services used
+
+===============================================================================
+NEXT STEPS
+===============================================================================
+1. Run 30-cirros-test.sh to test VM creation
+2. Optionally run Cinder scripts for block storage
+3. Deploy Horizon dashboard if needed
+
+===============================================================================
+END OF REPORT
+===============================================================================
