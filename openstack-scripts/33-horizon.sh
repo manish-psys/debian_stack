@@ -258,9 +258,10 @@ update_setting "ALLOWED_HOSTS" "['*', 'localhost', '${CONTROLLER_IP}', '${CONTRO
 echo "  Configuring TIME_ZONE..."
 update_setting "TIME_ZONE" "\"${TIME_ZONE}\""
 
-# Keystone URL - per official docs format
+# Keystone URL - must match actual Keystone endpoint (no /identity prefix on Debian)
+# NOTE: Official docs show /identity/v3 but Debian Keystone uses /v3 directly
 echo "  Configuring OPENSTACK_KEYSTONE_URL..."
-update_setting "OPENSTACK_KEYSTONE_URL" "\"http://${CONTROLLER_IP}:5000/identity/v3\""
+update_setting "OPENSTACK_KEYSTONE_URL" "\"http://${CONTROLLER_IP}:5000/v3\""
 
 echo "  Configuring OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT..."
 update_setting "OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT" "True"
