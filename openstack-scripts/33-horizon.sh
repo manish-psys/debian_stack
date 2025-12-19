@@ -98,6 +98,14 @@ fi
 # Verify installation
 dpkg -l | grep -E "^ii.*(openstack-dashboard|horizon)" | head -5
 
+# Ensure wsgi module is enabled (package dependency doesn't auto-enable it)
+if ! apache2ctl -M 2>/dev/null | grep -q "wsgi_module"; then
+    sudo a2enmod wsgi
+    echo "  ✓ Enabled mod_wsgi"
+else
+    echo "  ✓ mod_wsgi already enabled"
+fi
+
 ###############################################################################
 # [3/6] Backup Original Configuration
 ###############################################################################
