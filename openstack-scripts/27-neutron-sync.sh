@@ -172,10 +172,39 @@ for SERVICE in "${NEUTRON_SERVICES[@]}"; do
 done
 
 # ============================================================================
-# PART 5: Verify OVN Integration
+# PART 5: Restart OVN Services and Verify Integration
 # ============================================================================
 echo ""
-echo "[5/6] Verifying OVN integration..."
+echo "[5/6] Restarting OVN services and verifying integration..."
+
+# LESSON LEARNED (2025-12-20): OVN controller can get into a bad state where
+# it runs (high CPU) but stops sending heartbeats to Neutron. This causes
+# agents to show "Alive: XXX" and port binding to fail with "dead agent".
+# Restarting OVN services after Neutron sync ensures fresh agent registration.
+
+echo "  Restarting OVN services for clean agent registration..."
+
+# Restart OVN controller (part of ovn-host)
+sudo systemctl restart ovn-controller
+sleep 2
+if systemctl is-active --quiet ovn-controller; then
+    echo "  ✓ ovn-controller restarted"
+else
+    echo "  ✗ ovn-controller failed to restart!"
+fi
+
+# Restart OVN central services to ensure clean state
+sudo systemctl restart ovn-central
+sleep 3
+if systemctl is-active --quiet ovn-central; then
+    echo "  ✓ ovn-central restarted"
+else
+    echo "  ✗ ovn-central failed to restart!"
+fi
+
+# Wait for OVN to stabilize
+echo "  Waiting for OVN to stabilize..."
+sleep 5
 
 # Check OVN Northbound database connection
 echo "  Checking OVN databases..."
