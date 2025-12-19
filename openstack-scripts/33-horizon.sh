@@ -49,9 +49,67 @@ TIME_ZONE="Asia/Kolkata"  # Change to your timezone
 ERRORS=0
 
 ###############################################################################
-# [1/6] Prerequisites Check
+# [1/7] Fix Apache SSL Configuration (if broken)
 ###############################################################################
-echo "[1/6] Checking prerequisites..."
+echo "[1/7] Ensuring Apache configuration is valid..."
+
+# LESSON LEARNED: default-ssl.conf may be enabled without SSL module loaded
+# This causes Apache to fail. Fix it before proceeding.
+if [ -f /etc/apache2/sites-enabled/default-ssl.conf ]; then
+    # SSL site is enabled - ensure SSL module is also enabled
+    if ! apache2ctl -M 2>/dev/null | grep -q "ssl_module"; then
+        echo "  Enabling SSL module (required by default-ssl.conf)..."
+        sudo a2enmod ssl
+        echo "  ✓ SSL module enabled"
+    else
+        echo "  ✓ SSL module already enabled"
+    fi
+
+    # Generate self-signed certificate if not exists
+    SSL_CERT="/etc/ssl/certs/ssl-cert-snakeoil.pem"
+    SSL_KEY="/etc/ssl/private/ssl-cert-snakeoil.key"
+    if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
+        echo "  Generating self-signed SSL certificate..."
+        sudo apt-get install -y ssl-cert
+        sudo make-ssl-cert generate-default-snakeoil --force-overwrite
+        echo "  ✓ Self-signed certificate generated"
+    else
+        echo "  ✓ SSL certificate exists"
+    fi
+fi
+
+# Verify Apache config syntax before proceeding
+if ! sudo apache2ctl configtest 2>/dev/null; then
+    echo "  Apache config has errors. Attempting to fix..."
+    # If SSL site causes issues and we can't fix, disable it
+    if sudo apache2ctl configtest 2>&1 | grep -q "SSLEngine\|ssl"; then
+        echo "  Disabling problematic SSL site..."
+        sudo a2dissite default-ssl 2>/dev/null || true
+        echo "  ✓ Disabled default-ssl site"
+    fi
+fi
+
+# Ensure Apache config is now valid
+if sudo apache2ctl configtest 2>/dev/null; then
+    echo "  ✓ Apache configuration valid"
+else
+    echo "  ✗ ERROR: Apache configuration still invalid!"
+    sudo apache2ctl configtest
+    exit 1
+fi
+
+# Start Apache if not running
+if ! systemctl is-active --quiet apache2; then
+    echo "  Starting Apache..."
+    sudo systemctl start apache2
+    sleep 2
+fi
+
+###############################################################################
+# [2/7] Prerequisites Check
+###############################################################################
+echo ""
+echo "[2/7] Checking prerequisites..."
 
 # Check Keystone is accessible
 if ! curl -s "http://${CONTROLLER_IP}:5000/v3" | grep -q "version"; then
@@ -71,15 +129,16 @@ echo "  ✓ Memcached running"
 # Check Apache is running
 if ! systemctl is-active --quiet apache2; then
     echo "  ✗ ERROR: Apache2 not running!"
+    sudo journalctl -u apache2 --no-pager -n 10
     exit 1
 fi
 echo "  ✓ Apache2 running"
 
 ###############################################################################
-# [2/6] Install Horizon Package
+# [3/7] Install Horizon Package
 ###############################################################################
 echo ""
-echo "[2/6] Installing Horizon dashboard..."
+echo "[3/7] Installing Horizon dashboard..."
 
 # Use openstack-dashboard-apache which includes Apache configuration
 if dpkg -l | grep -q "^ii.*openstack-dashboard-apache"; then
@@ -107,10 +166,10 @@ else
 fi
 
 ###############################################################################
-# [3/6] Backup Original Configuration
+# [4/7] Backup Original Configuration
 ###############################################################################
 echo ""
-echo "[3/6] Backing up original configuration..."
+echo "[4/7] Backing up original configuration..."
 
 if [ -f "${HORIZON_CONF}.orig" ]; then
     echo "  ✓ Backup already exists"
@@ -120,10 +179,10 @@ else
 fi
 
 ###############################################################################
-# [4/6] Configure Horizon local_settings.py
+# [5/7] Configure Horizon local_settings.py
 ###############################################################################
 echo ""
-echo "[4/6] Configuring Horizon..."
+echo "[5/7] Configuring Horizon..."
 
 # Function to update Python settings file (idempotent)
 update_setting() {
@@ -247,10 +306,10 @@ HORIZON_EOF
 echo "  ✓ local_settings.py configured"
 
 ###############################################################################
-# [5/6] Reload Apache
+# [6/7] Reload Apache
 ###############################################################################
 echo ""
-echo "[5/6] Reloading Apache..."
+echo "[6/7] Reloading Apache..."
 
 # Reload Apache configuration (per official docs)
 sudo systemctl reload apache2
@@ -265,10 +324,10 @@ else
 fi
 
 ###############################################################################
-# [6/6] Verification
+# [7/7] Verification
 ###############################################################################
 echo ""
-echo "[6/6] Verifying Horizon installation..."
+echo "[7/7] Verifying Horizon installation..."
 
 # Wait for WSGI to initialize
 sleep 3
