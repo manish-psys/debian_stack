@@ -181,21 +181,36 @@ else
 fi
 
 ###############################################################################
-# [5/7] Add libvirt-qemu User to Cinder Group
+# [5/7] Add Users to Cinder Group for Keyring Access
 ###############################################################################
 echo ""
-echo "[5/7] Adding libvirt-qemu to cinder group..."
+echo "[5/7] Adding users to cinder group for keyring access..."
 
-# LESSON LEARNED: libvirt-qemu user needs read access to Ceph keyrings
-# Keyrings are owned by ceph:cinder with mode 640
+# LESSON LEARNED (2025-12-19): Multiple users need read access to Ceph keyrings
+# The cinder keyring is owned by ceph:cinder with mode 640
+# Users needing access:
+#   - libvirt-qemu: QEMU/KVM needs to read keyring for RBD disk access
+#   - nova: nova-compute service runs 'ceph df' to check disk usage
+# Without this, VM creation fails with "Could not determine disk usage"
+
+KEYRING_USERS=("libvirt-qemu" "nova")
+
 if getent group cinder &>/dev/null; then
-    # Check if already in group (idempotent)
-    if id -nG libvirt-qemu 2>/dev/null | grep -qw cinder; then
-        echo "  ✓ libvirt-qemu already in cinder group"
-    else
-        sudo usermod -aG cinder libvirt-qemu
-        echo "  ✓ libvirt-qemu added to cinder group"
-    fi
+    for KEYRING_USER in "${KEYRING_USERS[@]}"; do
+        # Check if user exists
+        if ! id "$KEYRING_USER" &>/dev/null; then
+            echo "  ⚠ User '$KEYRING_USER' does not exist yet"
+            continue
+        fi
+
+        # Check if already in group (idempotent)
+        if id -nG "$KEYRING_USER" 2>/dev/null | grep -qw cinder; then
+            echo "  ✓ $KEYRING_USER already in cinder group"
+        else
+            sudo usermod -aG cinder "$KEYRING_USER"
+            echo "  ✓ $KEYRING_USER added to cinder group"
+        fi
+    done
 else
     echo "  ⚠ cinder group not found - will be created when Cinder is installed"
 fi
