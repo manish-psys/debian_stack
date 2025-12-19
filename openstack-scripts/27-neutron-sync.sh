@@ -239,10 +239,16 @@ fi
 echo "  Waiting for agent heartbeat registration (up to 60s)..."
 MAX_WAIT=60
 WAIT_COUNT=0
+ALIVE_CHECK=0
 while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
-    # Check if any OVN agent shows as alive
-    ALIVE_CHECK=$(source ~/admin-openrc && /usr/bin/openstack network agent list -f value -c Alive 2>/dev/null | grep -c "True" || echo "0")
-    if [ "$ALIVE_CHECK" -gt 0 ]; then
+    # Check if any OVN agent shows as alive (use head -1 to get single value)
+    source ~/admin-openrc
+    ALIVE_CHECK=$(/usr/bin/openstack network agent list -f value -c Alive 2>/dev/null | grep -c "True" | head -1 || echo "0")
+    # Ensure it's a number
+    ALIVE_CHECK="${ALIVE_CHECK//[^0-9]/}"
+    ALIVE_CHECK="${ALIVE_CHECK:-0}"
+
+    if [ "$ALIVE_CHECK" -gt 0 ] 2>/dev/null; then
         echo "  ✓ Agent heartbeat detected ($ALIVE_CHECK agent(s) alive)"
         break
     fi
@@ -251,7 +257,7 @@ while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
     sleep 10
 done
 
-if [ "$ALIVE_CHECK" -eq 0 ]; then
+if [ "$ALIVE_CHECK" -eq 0 ] 2>/dev/null || [ -z "$ALIVE_CHECK" ]; then
     echo "  ⚠ WARNING: No agents showing as alive after ${MAX_WAIT}s"
     echo "    This may indicate OVN-Neutron integration issues"
 fi
