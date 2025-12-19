@@ -224,6 +224,38 @@ fi
 CHASSIS_COUNT=$(sudo ovn-sbctl show 2>/dev/null | /usr/bin/grep -c "Chassis" || echo "0")
 echo "  OVN Chassis count: ${CHASSIS_COUNT}"
 
+# CRITICAL: Restart neutron-ovn-metadata-agent AFTER OVN is stable
+# This ensures the agent registers with fresh heartbeat to Neutron
+echo "  Restarting neutron-ovn-metadata-agent for fresh heartbeat registration..."
+sudo systemctl restart neutron-ovn-metadata-agent
+sleep 3
+if systemctl is-active --quiet neutron-ovn-metadata-agent; then
+    echo "  ✓ neutron-ovn-metadata-agent restarted"
+else
+    echo "  ✗ neutron-ovn-metadata-agent failed to restart!"
+fi
+
+# Wait for agent to register with Neutron (heartbeat interval is typically 30s)
+echo "  Waiting for agent heartbeat registration (up to 60s)..."
+MAX_WAIT=60
+WAIT_COUNT=0
+while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+    # Check if any OVN agent shows as alive
+    ALIVE_CHECK=$(source ~/admin-openrc && /usr/bin/openstack network agent list -f value -c Alive 2>/dev/null | grep -c "True" || echo "0")
+    if [ "$ALIVE_CHECK" -gt 0 ]; then
+        echo "  ✓ Agent heartbeat detected ($ALIVE_CHECK agent(s) alive)"
+        break
+    fi
+    WAIT_COUNT=$((WAIT_COUNT + 10))
+    echo "    Waiting... (${WAIT_COUNT}s/${MAX_WAIT}s)"
+    sleep 10
+done
+
+if [ "$ALIVE_CHECK" -eq 0 ]; then
+    echo "  ⚠ WARNING: No agents showing as alive after ${MAX_WAIT}s"
+    echo "    This may indicate OVN-Neutron integration issues"
+fi
+
 # ============================================================================
 # PART 6: Final Verification
 # ============================================================================
