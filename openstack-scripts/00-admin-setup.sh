@@ -60,10 +60,12 @@ done
 echo ""
 echo "[2/3] Configuring sudo access..."
 
-# Create sudoers.d file for OpenStack admin
+# Create/update sudoers.d file for OpenStack admin
+# Always regenerate to ensure latest rules are applied (idempotent)
 SUDOERS_FILE="/etc/sudoers.d/openstack-admin"
-if [ ! -f "$SUDOERS_FILE" ]; then
-    cat > "$SUDOERS_FILE" << EOF
+SUDOERS_TEMP="/tmp/openstack-admin-sudoers.tmp"
+
+cat > "$SUDOERS_TEMP" << EOF
 # OpenStack Administrator sudo rules
 # Created by 00-admin-setup.sh
 
@@ -149,18 +151,22 @@ ${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/chgrp *
 # Allow running OpenStack setup scripts
 ${TARGET_USER} ALL=(ALL) NOPASSWD: /home/${TARGET_USER}/debian_stack/openstack-scripts/*.sh
 EOF
-    chmod 440 "$SUDOERS_FILE"
-    echo "  ✓ Created $SUDOERS_FILE"
-else
-    echo "  ✓ $SUDOERS_FILE already exists"
-fi
 
-# Validate sudoers syntax
-if visudo -c -f "$SUDOERS_FILE" > /dev/null 2>&1; then
+# Validate sudoers syntax before installing
+if visudo -c -f "$SUDOERS_TEMP" > /dev/null 2>&1; then
+    # Check if file changed (or doesn't exist)
+    if [ ! -f "$SUDOERS_FILE" ] || ! diff -q "$SUDOERS_TEMP" "$SUDOERS_FILE" > /dev/null 2>&1; then
+        cp "$SUDOERS_TEMP" "$SUDOERS_FILE"
+        chmod 440 "$SUDOERS_FILE"
+        echo "  ✓ Sudoers file updated: $SUDOERS_FILE"
+    else
+        echo "  ✓ Sudoers file already up to date"
+    fi
+    rm -f "$SUDOERS_TEMP"
     echo "  ✓ Sudoers syntax validated"
 else
     echo "  ✗ ERROR: Invalid sudoers syntax!"
-    rm -f "$SUDOERS_FILE"
+    rm -f "$SUDOERS_TEMP"
     exit 1
 fi
 
