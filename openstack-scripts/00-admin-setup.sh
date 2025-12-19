@@ -136,6 +136,18 @@ ${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/virsh *
 # Allow network diagnostics
 ${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/ss *
 ${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ss *
+
+# Allow user/group management (for OpenStack service permissions)
+${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/sbin/usermod *
+${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/sbin/groupadd *
+
+# Allow file permission management
+${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/chmod *
+${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/chown *
+${TARGET_USER} ALL=(ALL) NOPASSWD: /usr/bin/chgrp *
+
+# Allow running OpenStack setup scripts
+${TARGET_USER} ALL=(ALL) NOPASSWD: /home/${TARGET_USER}/debian_stack/openstack-scripts/*.sh
 EOF
     chmod 440 "$SUDOERS_FILE"
     echo "  ✓ Created $SUDOERS_FILE"
