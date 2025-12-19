@@ -34,17 +34,24 @@ echo ""
 echo "[1/4] Removing Horizon packages..."
 
 if dpkg -l | grep -q "^ii.*openstack-dashboard-apache"; then
-    sudo apt remove --no-auto-remove -y openstack-dashboard-apache 2>/dev/null || true
+    sudo apt remove --purge --no-auto-remove -y openstack-dashboard-apache 2>/dev/null || true
     echo "  ✓ openstack-dashboard-apache removed"
 else
     echo "  ✓ openstack-dashboard-apache not installed"
 fi
 
 if dpkg -l | grep -q "^ii.*openstack-dashboard "; then
-    sudo apt remove --no-auto-remove -y openstack-dashboard 2>/dev/null || true
+    sudo apt remove --purge --no-auto-remove -y openstack-dashboard 2>/dev/null || true
     echo "  ✓ openstack-dashboard removed"
 else
     echo "  ✓ openstack-dashboard not installed"
+fi
+
+if dpkg -l | grep -q "^ii.*python3-django-horizon"; then
+    sudo apt remove --purge --no-auto-remove -y python3-django-horizon 2>/dev/null || true
+    echo "  ✓ python3-django-horizon removed"
+else
+    echo "  ✓ python3-django-horizon not installed"
 fi
 
 ###############################################################################
@@ -75,16 +82,27 @@ fi
 echo ""
 echo "[3/4] Cleaning up Apache configuration..."
 
-# Remove any horizon Apache configs
+# Disable horizon sites first (to remove symlinks properly)
+sudo a2dissite openstack-dashboard-alias-only 2>/dev/null || true
+sudo a2dissite openstack-dashboard 2>/dev/null || true
+sudo a2disconf openstack-dashboard 2>/dev/null || true
+
+# Remove any horizon Apache configs (both sites-available and conf-available)
 for conf in /etc/apache2/conf-available/openstack-dashboard.conf \
-            /etc/apache2/sites-available/horizon.conf \
             /etc/apache2/conf-enabled/openstack-dashboard.conf \
+            /etc/apache2/sites-available/openstack-dashboard.conf \
+            /etc/apache2/sites-available/openstack-dashboard-alias-only.conf \
+            /etc/apache2/sites-available/horizon.conf \
+            /etc/apache2/sites-enabled/openstack-dashboard.conf \
+            /etc/apache2/sites-enabled/openstack-dashboard-alias-only.conf \
             /etc/apache2/sites-enabled/horizon.conf; do
     if [ -f "$conf" ] || [ -L "$conf" ]; then
         sudo rm -f "$conf"
         echo "  ✓ Removed $conf"
     fi
 done
+
+echo "  ✓ Apache Horizon configuration cleaned"
 
 ###############################################################################
 # [4/4] Reload Apache

@@ -166,10 +166,56 @@ else
 fi
 
 ###############################################################################
-# [4/7] Backup Original Configuration
+# [4/8] Fix WSGI Configuration for Python 3.13 (PyO3/cryptography compatibility)
 ###############################################################################
 echo ""
-echo "[4/7] Backing up original configuration..."
+echo "[4/8] Fixing WSGI configuration for Python 3.13..."
+
+# LESSON LEARNED: Python 3.13 with cryptography library requires WSGIApplicationGroup %{GLOBAL}
+# The cryptography package uses PyO3 (Rust bindings) which cannot be initialized
+# multiple times in sub-interpreters. This causes "ImportError: PyO3 modules
+# compiled for CPython 3.8 or older may only be initialized once per interpreter process"
+#
+# Fix: Add WSGIApplicationGroup %{GLOBAL} to run Horizon in the main interpreter
+
+DASHBOARD_APACHE_CONF="/etc/apache2/sites-available/openstack-dashboard-alias-only.conf"
+
+if [ -f "$DASHBOARD_APACHE_CONF" ]; then
+    # Check if already configured (idempotent)
+    if sudo grep -q "WSGIApplicationGroup" "$DASHBOARD_APACHE_CONF"; then
+        echo "  ✓ WSGIApplicationGroup already configured"
+    else
+        # Add WSGIApplicationGroup after WSGIDaemonProcess line
+        sudo sed -i '/WSGIDaemonProcess horizon/a WSGIApplicationGroup %{GLOBAL}' "$DASHBOARD_APACHE_CONF"
+        echo "  ✓ Added WSGIApplicationGroup %{GLOBAL} for Python 3.13 compatibility"
+    fi
+
+    # Also ensure WSGIProcessGroup is set
+    if sudo grep -q "WSGIProcessGroup" "$DASHBOARD_APACHE_CONF"; then
+        echo "  ✓ WSGIProcessGroup already configured"
+    else
+        sudo sed -i '/WSGIDaemonProcess horizon/a WSGIProcessGroup horizon' "$DASHBOARD_APACHE_CONF"
+        echo "  ✓ Added WSGIProcessGroup horizon"
+    fi
+else
+    echo "  ⚠ Dashboard Apache config not found at expected location"
+    echo "    Looking for alternative config..."
+    # Try to find the config file
+    FOUND_CONF=$(find /etc/apache2 -name "*dashboard*.conf" 2>/dev/null | head -1)
+    if [ -n "$FOUND_CONF" ]; then
+        echo "    Found: $FOUND_CONF"
+        if ! sudo grep -q "WSGIApplicationGroup" "$FOUND_CONF"; then
+            sudo sed -i '/WSGIDaemonProcess/a WSGIApplicationGroup %{GLOBAL}' "$FOUND_CONF"
+            echo "  ✓ Added WSGIApplicationGroup %{GLOBAL}"
+        fi
+    fi
+fi
+
+###############################################################################
+# [5/8] Backup Original Configuration
+###############################################################################
+echo ""
+echo "[5/8] Backing up original configuration..."
 
 if [ -f "${HORIZON_CONF}.orig" ]; then
     echo "  ✓ Backup already exists"
@@ -179,10 +225,10 @@ else
 fi
 
 ###############################################################################
-# [5/7] Configure Horizon local_settings.py
+# [6/8] Configure Horizon local_settings.py
 ###############################################################################
 echo ""
-echo "[5/7] Configuring Horizon..."
+echo "[6/8] Configuring Horizon..."
 
 # Function to update Python settings file (idempotent)
 update_setting() {
@@ -306,17 +352,17 @@ HORIZON_EOF
 echo "  ✓ local_settings.py configured"
 
 ###############################################################################
-# [6/7] Reload Apache
+# [7/8] Restart Apache
 ###############################################################################
 echo ""
-echo "[6/7] Reloading Apache..."
+echo "[7/8] Restarting Apache..."
 
-# Reload Apache configuration (per official docs)
-sudo systemctl reload apache2
-sleep 2
+# Restart Apache (required after WSGI config changes, reload is not sufficient)
+sudo systemctl restart apache2
+sleep 3
 
 if systemctl is-active --quiet apache2; then
-    echo "  ✓ Apache reloaded successfully"
+    echo "  ✓ Apache restarted successfully"
 else
     echo "  ✗ Apache failed!"
     sudo journalctl -u apache2 --no-pager -n 20
@@ -324,10 +370,10 @@ else
 fi
 
 ###############################################################################
-# [7/7] Verification
+# [8/8] Verification
 ###############################################################################
 echo ""
-echo "[7/7] Verifying Horizon installation..."
+echo "[8/8] Verifying Horizon installation..."
 
 # Wait for WSGI to initialize
 sleep 3
