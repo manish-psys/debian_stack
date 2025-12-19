@@ -1,0 +1,18 @@
+[Unit]
+Description=Fix Provider Bridge Connectivity for OVN
+Documentation=https://docs.openstack.org/neutron/latest/admin/ovn/index.html
+# Run after OVN and OVS services are fully started
+After=openvswitch-switch.service ovn-controller.service ovn-host.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fix-provider-bridge.sh br-provider
+RemainAfterExit=yes
+
+# Retry on failure - OVN might not be fully ready
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
