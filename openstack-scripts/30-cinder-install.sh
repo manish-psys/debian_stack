@@ -193,9 +193,10 @@ echo ""
 echo "[5/8] Configuring cinder.conf..."
 
 # [database] section
+# NOTE: Use CONTROLLER_IP not localhost - MariaDB binds to controller IP only
 echo "  Configuring [database]..."
 sudo crudini --set "$CINDER_CONF" database connection \
-    "mysql+pymysql://cinder:${CINDER_DB_PASS}@localhost/cinder"
+    "mysql+pymysql://cinder:${CINDER_DB_PASS}@${CONTROLLER_IP}/cinder"
 echo "  ✓ [database] configured"
 
 # [DEFAULT] section
