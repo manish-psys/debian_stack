@@ -5,12 +5,9 @@
 # Idempotent - safe to run multiple times
 #
 # This script:
-# - Disables Horizon Apache site
-# - Removes Apache configuration
-# - Removes openstack-dashboard package
-# - Cleans up configuration files, static files, and cache
-# - Re-enables default Apache site
-# - Restarts Apache
+# - Removes openstack-dashboard-apache package
+# - Cleans up configuration files
+# - Reloads Apache
 #
 # NOTE: Uses safe removal to avoid cascade deletion of dependencies
 ###############################################################################
@@ -31,52 +28,19 @@ fi
 echo "=== Cleanup: Horizon Dashboard ==="
 
 ###############################################################################
-# [1/6] Disable Horizon Apache Site
+# [1/4] Remove Horizon Packages
 ###############################################################################
 echo ""
-echo "[1/6] Disabling Horizon Apache site..."
+echo "[1/4] Removing Horizon packages..."
 
-if [ -L /etc/apache2/sites-enabled/horizon.conf ]; then
-    sudo a2dissite horizon 2>/dev/null || true
-    echo "  ✓ Disabled Horizon site"
+if dpkg -l | grep -q "^ii.*openstack-dashboard-apache"; then
+    sudo apt remove --no-auto-remove -y openstack-dashboard-apache 2>/dev/null || true
+    echo "  ✓ openstack-dashboard-apache removed"
 else
-    echo "  ✓ Horizon site already disabled"
+    echo "  ✓ openstack-dashboard-apache not installed"
 fi
 
-###############################################################################
-# [2/6] Re-enable Default Site
-###############################################################################
-echo ""
-echo "[2/6] Re-enabling default Apache site..."
-
-if [ ! -L /etc/apache2/sites-enabled/000-default.conf ]; then
-    sudo a2ensite 000-default 2>/dev/null || true
-    echo "  ✓ Enabled default site"
-else
-    echo "  ✓ Default site already enabled"
-fi
-
-###############################################################################
-# [3/6] Remove Horizon Apache Config
-###############################################################################
-echo ""
-echo "[3/6] Removing Horizon Apache configuration..."
-
-if [ -f /etc/apache2/sites-available/horizon.conf ]; then
-    sudo rm -f /etc/apache2/sites-available/horizon.conf
-    echo "  ✓ Removed /etc/apache2/sites-available/horizon.conf"
-else
-    echo "  ✓ Apache config already removed"
-fi
-
-###############################################################################
-# [4/6] Remove Horizon Package
-###############################################################################
-echo ""
-echo "[4/6] Removing Horizon package..."
-
-if dpkg -l | grep -q "^ii.*openstack-dashboard"; then
-    # Use --no-auto-remove to prevent cascade deletion of shared dependencies
+if dpkg -l | grep -q "^ii.*openstack-dashboard "; then
     sudo apt remove --no-auto-remove -y openstack-dashboard 2>/dev/null || true
     echo "  ✓ openstack-dashboard removed"
 else
@@ -84,10 +48,10 @@ else
 fi
 
 ###############################################################################
-# [5/6] Cleanup Files
+# [2/4] Cleanup Configuration Files
 ###############################################################################
 echo ""
-echo "[5/6] Cleaning up files..."
+echo "[2/4] Cleaning up configuration files..."
 
 # Remove config directory
 if [ -d /etc/openstack-dashboard ]; then
@@ -105,26 +69,33 @@ else
     echo "  ✓ Static directory already removed"
 fi
 
-# Remove log files
-if [ -f /var/log/apache2/horizon_error.log ]; then
-    sudo rm -f /var/log/apache2/horizon_error.log
-    echo "  ✓ Removed horizon_error.log"
-fi
-if [ -f /var/log/apache2/horizon_access.log ]; then
-    sudo rm -f /var/log/apache2/horizon_access.log
-    echo "  ✓ Removed horizon_access.log"
-fi
-
 ###############################################################################
-# [6/6] Restart Apache
+# [3/4] Cleanup Apache Configuration
 ###############################################################################
 echo ""
-echo "[6/6] Restarting Apache..."
+echo "[3/4] Cleaning up Apache configuration..."
 
-sudo systemctl restart apache2 2>/dev/null || true
+# Remove any horizon Apache configs
+for conf in /etc/apache2/conf-available/openstack-dashboard.conf \
+            /etc/apache2/sites-available/horizon.conf \
+            /etc/apache2/conf-enabled/openstack-dashboard.conf \
+            /etc/apache2/sites-enabled/horizon.conf; do
+    if [ -f "$conf" ] || [ -L "$conf" ]; then
+        sudo rm -f "$conf"
+        echo "  ✓ Removed $conf"
+    fi
+done
+
+###############################################################################
+# [4/4] Reload Apache
+###############################################################################
+echo ""
+echo "[4/4] Reloading Apache..."
+
+sudo systemctl reload apache2 2>/dev/null || sudo systemctl restart apache2 || true
 
 if systemctl is-active --quiet apache2; then
-    echo "  ✓ Apache restarted"
+    echo "  ✓ Apache reloaded"
 else
     echo "  ⚠ Apache may have issues - check logs"
 fi

@@ -4,25 +4,24 @@
 # Install and configure OpenStack Horizon Dashboard
 # Idempotent - safe to run multiple times
 #
+# This script follows the official OpenStack documentation for Debian:
+# https://docs.openstack.org/horizon/latest/install/install-debian.html
+#
 # This script:
-# - Installs openstack-dashboard package and dependencies
+# - Installs openstack-dashboard-apache package (includes Apache config)
 # - Configures local_settings.py for Keystone v3
-# - Creates Apache virtual host configuration (Debian package doesn't include it!)
-# - Sets up writable static directory with proper permissions
-# - Configures Django session/cache with memcached
-# - Enables required Apache modules and site
+# - Configures memcached session storage
+# - Reloads Apache
 #
 # Prerequisites:
 # - Keystone operational (script 15)
 # - Memcached running (script 07)
 # - Apache2 running (for Keystone)
 #
-# Key Debian Trixie-specific issues addressed:
-# 1. Debian package does NOT include Apache config - we create it manually
-# 2. WEBROOT must be set to '/horizon/' since we mount at /horizon
-# 3. Static files need to be in a WRITABLE directory for compressor
-# 4. Django 4.x requires PyMemcacheCache (not deprecated MemcachedCache)
-# 5. SECRET_KEY must be configured for Django security
+# Key points:
+# 1. openstack-dashboard-apache handles Apache configuration automatically
+# 2. Dashboard is accessible at /horizon by default
+# 3. Uses memcached for session storage
 ###############################################################################
 set -e
 
@@ -46,22 +45,13 @@ echo ""
 HORIZON_CONF="/etc/openstack-dashboard/local_settings.py"
 TIME_ZONE="Asia/Kolkata"  # Change to your timezone
 
-# Apache/WSGI paths
-APACHE_SITE="/etc/apache2/sites-available/horizon.conf"
-WSGI_FILE="/usr/share/openstack-dashboard/wsgi.py"
-PYTHON_PATH="/usr/lib/python3/dist-packages"
-HORIZON_CONF_DIR="/etc/openstack-dashboard"
-
-# Static files - use WRITABLE directory
-STATIC_ROOT="/var/lib/openstack-dashboard/static"
-
 # Error counter
 ERRORS=0
 
 ###############################################################################
-# [1/9] Prerequisites Check
+# [1/6] Prerequisites Check
 ###############################################################################
-echo "[1/9] Checking prerequisites..."
+echo "[1/6] Checking prerequisites..."
 
 # Check Keystone is accessible
 if ! curl -s "http://${CONTROLLER_IP}:5000/v3" | grep -q "version"; then
@@ -86,46 +76,33 @@ fi
 echo "  ✓ Apache2 running"
 
 ###############################################################################
-# [2/9] Install Horizon Package and Dependencies
+# [2/6] Install Horizon Package
 ###############################################################################
 echo ""
-echo "[2/9] Installing Horizon dashboard and dependencies..."
+echo "[2/6] Installing Horizon dashboard..."
 
-# Install openstack-dashboard and required Python packages
-if dpkg -l | grep -q "^ii.*openstack-dashboard "; then
-    echo "  ✓ openstack-dashboard already installed"
+# Use openstack-dashboard-apache which includes Apache configuration
+if dpkg -l | grep -q "^ii.*openstack-dashboard-apache"; then
+    echo "  ✓ openstack-dashboard-apache already installed"
 else
     sudo apt update
-    # Install Horizon with memcache support
-    sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-        openstack-dashboard \
-        python3-pymemcache
-    echo "  ✓ openstack-dashboard installed"
-fi
+    # Pre-configure debconf to use /horizon URL (not webroot)
+    echo "openstack-dashboard-apache openstack-dashboard/activate-vhost boolean true" | sudo debconf-set-selections
+    echo "openstack-dashboard-apache openstack-dashboard/use-ssl boolean false" | sudo debconf-set-selections
 
-# Ensure python3-pymemcache is installed (for Django cache backend)
-if ! dpkg -l | grep -q "^ii.*python3-pymemcache"; then
-    sudo apt install -y python3-pymemcache
-    echo "  ✓ python3-pymemcache installed"
-else
-    echo "  ✓ python3-pymemcache already installed"
+    # Install with automatic Apache configuration
+    sudo DEBIAN_FRONTEND=noninteractive apt install -y openstack-dashboard-apache
+    echo "  ✓ openstack-dashboard-apache installed"
 fi
 
 # Verify installation
-dpkg -l | grep -E "^ii.*openstack-dashboard" | head -1
-
-# Verify WSGI file exists
-if [ ! -f "$WSGI_FILE" ]; then
-    echo "  ✗ ERROR: WSGI file not found: $WSGI_FILE"
-    exit 1
-fi
-echo "  ✓ WSGI file exists"
+dpkg -l | grep -E "^ii.*(openstack-dashboard|horizon)" | head -5
 
 ###############################################################################
-# [3/9] Backup Original Configuration
+# [3/6] Backup Original Configuration
 ###############################################################################
 echo ""
-echo "[3/9] Backing up original configuration..."
+echo "[3/6] Backing up original configuration..."
 
 if [ -f "${HORIZON_CONF}.orig" ]; then
     echo "  ✓ Backup already exists"
@@ -135,26 +112,10 @@ else
 fi
 
 ###############################################################################
-# [4/9] Generate Secret Key
+# [4/6] Configure Horizon local_settings.py
 ###############################################################################
 echo ""
-echo "[4/9] Generating Django SECRET_KEY..."
-
-# Generate a unique secret key for this installation
-# Use existing if already in config, otherwise generate new
-if sudo grep -q "^SECRET_KEY = " "$HORIZON_CONF" 2>/dev/null; then
-    echo "  ✓ SECRET_KEY already configured"
-else
-    # Generate a random 50-character secret key
-    SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(50))")
-    echo "  ✓ SECRET_KEY generated"
-fi
-
-###############################################################################
-# [5/9] Configure Horizon local_settings.py
-###############################################################################
-echo ""
-echo "[5/9] Configuring Horizon..."
+echo "[4/6] Configuring Horizon..."
 
 # Function to update Python settings file (idempotent)
 update_setting() {
@@ -174,72 +135,56 @@ update_setting() {
     fi
 }
 
-# Basic settings
-echo "  Configuring basic settings..."
+# Basic settings per official docs
+echo "  Configuring OPENSTACK_HOST..."
 update_setting "OPENSTACK_HOST" "\"${CONTROLLER_IP}\""
+
+echo "  Configuring ALLOWED_HOSTS..."
 update_setting "ALLOWED_HOSTS" "['*', 'localhost', '${CONTROLLER_IP}', '${CONTROLLER_HOSTNAME}']"
+
+echo "  Configuring TIME_ZONE..."
 update_setting "TIME_ZONE" "\"${TIME_ZONE}\""
 
-# Keystone settings
-echo "  Configuring Keystone integration..."
-update_setting "OPENSTACK_KEYSTONE_URL" "\"http://${CONTROLLER_IP}:5000/v3\""
+# Keystone URL - per official docs format
+echo "  Configuring OPENSTACK_KEYSTONE_URL..."
+update_setting "OPENSTACK_KEYSTONE_URL" "\"http://${CONTROLLER_IP}:5000/identity/v3\""
+
+echo "  Configuring OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT..."
 update_setting "OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT" "True"
+
+echo "  Configuring OPENSTACK_KEYSTONE_DEFAULT_DOMAIN..."
 update_setting "OPENSTACK_KEYSTONE_DEFAULT_DOMAIN" "\"Default\""
 
 # Remove any existing custom config block to avoid duplicates (idempotent)
 sudo sed -i '/^# === CUSTOM OPENSTACK CONFIG ===/,/^# === END CUSTOM CONFIG ===/d' "$HORIZON_CONF"
 
-# Add comprehensive configuration block
-echo "  Adding custom configuration block..."
-cat <<HORIZON_EOF | sudo tee -a "$HORIZON_CONF" > /dev/null
+# Add configuration block per official docs
+echo "  Adding configuration block..."
+cat <<'HORIZON_EOF' | sudo tee -a "$HORIZON_CONF" > /dev/null
 
 # === CUSTOM OPENSTACK CONFIG ===
 # Added by 33-horizon.sh
+# Based on: https://docs.openstack.org/horizon/latest/install/install-debian.html
 
 # =============================================================================
-# CRITICAL: Django SECRET_KEY
-# This must be unique for each installation for security
-# =============================================================================
-SECRET_KEY = '${SECRET_KEY:-$(python3 -c "import secrets; print(secrets.token_urlsafe(50))")}'
-
-# =============================================================================
-# CRITICAL: WEBROOT Configuration
-# Since we mount Horizon at /horizon (not /), Django needs to know this
-# Without this, login redirects go to /auth/login/ instead of /horizon/auth/login/
-# =============================================================================
-WEBROOT = '/horizon/'
-LOGIN_URL = '/horizon/auth/login/'
-LOGOUT_URL = '/horizon/auth/logout/'
-LOGIN_REDIRECT_URL = '/horizon/'
-
-# =============================================================================
-# CRITICAL: Static Files Configuration
-# Static files MUST be in a writable directory for Django compressor
-# We use /var/lib/openstack-dashboard/static/ (writable by www-data)
-# =============================================================================
-STATIC_ROOT = '${STATIC_ROOT}'
-STATIC_URL = '/horizon/static/'
-
-# Disable offline compression - we'll compress on first request
-# This works because STATIC_ROOT is now writable
-COMPRESS_OFFLINE = False
-COMPRESS_ENABLED = True
-
-# =============================================================================
-# Session Configuration - use memcached
-# Django 4.x requires PyMemcacheCache (not deprecated MemcachedCache)
+# Session Configuration - use memcached (per official docs)
 # =============================================================================
 SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
 
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.memcached.PyMemcacheCache',
-        'LOCATION': '${MEMCACHED_SERVERS}',
-    },
+         'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
+HORIZON_EOF
+
+# Add memcached location with variable substitution
+echo "         'LOCATION': '${CONTROLLER_IP}:11211'," | sudo tee -a "$HORIZON_CONF" > /dev/null
+
+cat <<'HORIZON_EOF' | sudo tee -a "$HORIZON_CONF" > /dev/null
+    }
 }
 
 # =============================================================================
-# API Versions
+# API Versions (per official docs)
 # =============================================================================
 OPENSTACK_API_VERSIONS = {
     "identity": 3,
@@ -247,17 +192,9 @@ OPENSTACK_API_VERSIONS = {
     "volume": 3,
 }
 
-# Default role for new users
-OPENSTACK_KEYSTONE_DEFAULT_ROLE = "member"
-
-# Disable SSL certificate verification (for self-signed certs)
-OPENSTACK_SSL_NO_VERIFY = True
-
 # =============================================================================
-# Service-specific Settings
+# Neutron Network Settings (with router support for OVN)
 # =============================================================================
-
-# Neutron (Network) settings - OVN compatible
 OPENSTACK_NEUTRON_NETWORK = {
     'enable_router': True,
     'enable_quotas': True,
@@ -266,6 +203,16 @@ OPENSTACK_NEUTRON_NETWORK = {
     'enable_ha_router': False,
     'enable_fip_topology_check': True,
 }
+
+# =============================================================================
+# Additional Settings
+# =============================================================================
+
+# Default role for new users
+OPENSTACK_KEYSTONE_DEFAULT_ROLE = "member"
+
+# Disable SSL certificate verification (for self-signed certs)
+OPENSTACK_SSL_NO_VERIFY = True
 
 # Cinder (Volume) settings
 OPENSTACK_CINDER_FEATURES = {
@@ -292,170 +239,43 @@ HORIZON_EOF
 echo "  ✓ local_settings.py configured"
 
 ###############################################################################
-# [6/9] Setup Writable Static Directory
+# [5/6] Reload Apache
 ###############################################################################
 echo ""
-echo "[6/9] Setting up writable static directory..."
+echo "[5/6] Reloading Apache..."
 
-# Create static directory if not exists
-sudo mkdir -p "${STATIC_ROOT}"
-
-# Copy static files from package location to writable location
-echo "  Copying static files (this may take a moment)..."
-if [ -d "/usr/lib/python3/dist-packages/openstack_dashboard/static" ]; then
-    sudo cp -r /usr/lib/python3/dist-packages/openstack_dashboard/static/* "${STATIC_ROOT}/" 2>/dev/null || true
-    echo "  ✓ Copied openstack_dashboard static files"
-fi
-
-# Also copy from horizon package if exists
-if [ -d "/usr/lib/python3/dist-packages/horizon/static" ]; then
-    sudo cp -r /usr/lib/python3/dist-packages/horizon/static/* "${STATIC_ROOT}/" 2>/dev/null || true
-    echo "  ✓ Copied horizon static files"
-fi
-
-# Set ownership to www-data so Django compressor can write
-sudo chown -R www-data:www-data "${STATIC_ROOT}"
-sudo chmod -R 755 "${STATIC_ROOT}"
-
-# Create CACHE directory for compressor
-sudo mkdir -p "${STATIC_ROOT}/CACHE"
-sudo chown www-data:www-data "${STATIC_ROOT}/CACHE"
-
-echo "  ✓ Static directory ready: ${STATIC_ROOT}"
-echo "  ✓ Ownership set to www-data"
-
-###############################################################################
-# [7/9] Create Apache Virtual Host Configuration
-###############################################################################
-echo ""
-echo "[7/9] Creating Apache configuration..."
-
-sudo tee "$APACHE_SITE" > /dev/null <<APACHE_EOF
-# OpenStack Horizon Dashboard Apache Configuration
-# Created by 33-horizon.sh
-#
-# Note: Debian's openstack-dashboard package does not include this file.
-
-<VirtualHost *:80>
-    ServerName ${CONTROLLER_IP}
-    ServerAlias ${CONTROLLER_HOSTNAME}
-
-    # Redirect root to horizon
-    RedirectMatch ^/\$ /horizon/
-
-    # WSGI Configuration for Horizon
-    WSGIScriptAlias /horizon ${WSGI_FILE}
-    WSGIDaemonProcess horizon user=www-data group=www-data processes=3 threads=10 \\
-        python-path=${PYTHON_PATH}:${HORIZON_CONF_DIR} display-name=horizon
-    WSGIProcessGroup horizon
-    WSGIApplicationGroup %{GLOBAL}
-
-    # Horizon WSGI directory permissions
-    <Directory /usr/share/openstack-dashboard>
-        <Files wsgi.py>
-            Require all granted
-        </Files>
-    </Directory>
-
-    # Static files - served directly by Apache from WRITABLE directory
-    Alias /horizon/static ${STATIC_ROOT}
-    <Directory ${STATIC_ROOT}>
-        Options FollowSymLinks
-        Require all granted
-    </Directory>
-
-    # Logging
-    ErrorLog \${APACHE_LOG_DIR}/horizon_error.log
-    CustomLog \${APACHE_LOG_DIR}/horizon_access.log combined
-    LogLevel warn
-</VirtualHost>
-APACHE_EOF
-
-echo "  ✓ Created Apache config: $APACHE_SITE"
-
-###############################################################################
-# [8/9] Enable Apache Modules and Site
-###############################################################################
-echo ""
-echo "[8/9] Enabling Apache modules and Horizon site..."
-
-# Enable required modules
-for mod in wsgi headers rewrite; do
-    if ! apache2ctl -M 2>/dev/null | grep -q "${mod}_module"; then
-        sudo a2enmod $mod
-        echo "  ✓ Enabled mod_$mod"
-    else
-        echo "  ✓ mod_$mod already enabled"
-    fi
-done
-
-# Disable default site (conflicts with Horizon on port 80)
-if [ -L /etc/apache2/sites-enabled/000-default.conf ]; then
-    sudo a2dissite 000-default
-    echo "  ✓ Disabled default site"
-else
-    echo "  ✓ Default site already disabled"
-fi
-
-# Enable Horizon site (idempotent)
-if [ ! -L /etc/apache2/sites-enabled/horizon.conf ]; then
-    sudo a2ensite horizon
-    echo "  ✓ Enabled Horizon site"
-else
-    echo "  ✓ Horizon site already enabled"
-fi
-
-###############################################################################
-# [9/9] Test and Restart Apache
-###############################################################################
-echo ""
-echo "[9/9] Testing and restarting Apache..."
-
-# Test Apache configuration syntax
-if sudo apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
-    echo "  ✓ Apache config syntax OK"
-else
-    echo "  ✗ Apache config error!"
-    sudo apache2ctl configtest
-    ERRORS=$((ERRORS+1))
-fi
-
-# Restart Apache
-sudo systemctl restart apache2
-sleep 3
-
-if systemctl is-active --quiet apache2; then
-    echo "  ✓ Apache restarted successfully"
-else
-    echo "  ✗ Apache failed to start!"
-    sudo journalctl -u apache2 --no-pager -n 30
-    ERRORS=$((ERRORS+1))
-fi
-
-###############################################################################
-# Verification
-###############################################################################
-echo ""
-echo "[Verification] Checking Horizon installation..."
-
-# Wait for WSGI to initialize and first compression
-echo "  Waiting for initial page load (compressing static files)..."
+# Reload Apache configuration (per official docs)
+sudo systemctl reload apache2
 sleep 2
 
-# First request will trigger compression - give it time
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}/horizon/auth/login/" --max-time 60 2>/dev/null || echo "000")
+if systemctl is-active --quiet apache2; then
+    echo "  ✓ Apache reloaded successfully"
+else
+    echo "  ✗ Apache failed!"
+    sudo journalctl -u apache2 --no-pager -n 20
+    ERRORS=$((ERRORS+1))
+fi
+
+###############################################################################
+# [6/6] Verification
+###############################################################################
+echo ""
+echo "[6/6] Verifying Horizon installation..."
+
+# Wait for WSGI to initialize
+sleep 3
+
+# Check if Horizon is accessible
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${CONTROLLER_IP}/horizon/auth/login/" --max-time 30 2>/dev/null || echo "000")
 
 if [ "$HTTP_CODE" = "200" ]; then
     echo "  ✓ Horizon login page accessible (HTTP 200)"
 elif [ "$HTTP_CODE" = "302" ]; then
-    echo "  ✓ Horizon login page redirecting (HTTP 302) - normal behavior"
-elif [ "$HTTP_CODE" = "500" ]; then
-    echo "  ✗ Horizon returned HTTP 500 - check logs"
-    echo "    View errors: sudo tail -30 /var/log/apache2/horizon_error.log"
-    ERRORS=$((ERRORS+1))
+    echo "  ✓ Horizon responding with redirect (HTTP 302)"
 else
-    echo "  ⚠ Horizon login returned HTTP ${HTTP_CODE}"
-    echo "    First load may be slow due to compression. Try browser."
+    echo "  ⚠ Horizon returned HTTP ${HTTP_CODE}"
+    echo "    Check: sudo tail -30 /var/log/apache2/error.log"
+    ERRORS=$((ERRORS+1))
 fi
 
 # Verify Keystone is still accessible
@@ -486,31 +306,16 @@ echo "  Domain:   Default"
 echo "  Username: admin"
 echo "  Password: ${ADMIN_PASS}"
 echo ""
-echo "Configuration files:"
-echo "  Horizon config: ${HORIZON_CONF}"
-echo "  Apache config:  ${APACHE_SITE}"
-echo "  Static files:   ${STATIC_ROOT}"
-echo "  Horizon logs:   /var/log/apache2/horizon_error.log"
+echo "Configuration file: ${HORIZON_CONF}"
 echo ""
-echo "NOTE: First page load may be slow (30-60 seconds) as Django"
-echo "      compresses static files. Subsequent loads will be fast."
-echo ""
-echo "Available features:"
-echo "  ✓ Identity (Keystone) - Users, Projects, Roles"
-echo "  ✓ Compute (Nova) - Instances, Flavors, Keypairs"
-echo "  ✓ Network (Neutron) - Networks, Routers, Security Groups"
-echo "  ✓ Volume (Cinder) - Volumes, Snapshots"
-echo "  ✓ Image (Glance) - Images"
+echo "Apache logs:"
+echo "  sudo tail -f /var/log/apache2/error.log"
 echo ""
 echo "Troubleshooting:"
-echo "  # Check Apache status"
-echo "  sudo systemctl status apache2"
-echo ""
-echo "  # View Horizon error logs"
-echo "  sudo tail -f /var/log/apache2/horizon_error.log"
-echo ""
-echo "  # If login fails, clear cache and restart"
-echo "  sudo rm -rf ${STATIC_ROOT}/CACHE"
+echo "  # If login fails, restart Apache"
 echo "  sudo systemctl restart apache2"
+echo ""
+echo "  # Check Horizon config syntax"
+echo "  sudo python3 -c \"import sys; sys.path.insert(0,'/etc/openstack-dashboard'); import local_settings\""
 echo ""
 echo "Next: Access the dashboard at http://${CONTROLLER_IP}/horizon"
