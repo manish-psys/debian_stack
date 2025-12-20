@@ -159,6 +159,17 @@ if ! sudo ovs-vsctl show &>/dev/null; then
 fi
 echo "  ✓ OVS service running"
 
+# CRITICAL (2025-12-20): Enable OVSDB TCP listener for Nova os_vif plugin
+# Nova's os_vif uses tcp:127.0.0.1:6640 to connect to OVS for VM port operations
+# Without this, VM creation fails with "Could not retrieve schema from tcp:127.0.0.1:6640"
+if ! ss -tlnp | grep -q ":6640"; then
+    echo "  Enabling OVSDB TCP listener on port 6640..."
+    sudo ovs-vsctl set-manager ptcp:6640:127.0.0.1
+    echo "  ✓ OVSDB TCP listener enabled"
+else
+    echo "  ✓ OVSDB TCP listener already enabled"
+fi
+
 # ============================================================================
 # PART 2: Install OVN
 # ============================================================================

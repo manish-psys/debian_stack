@@ -220,6 +220,41 @@ else
     echo "  ✗ Cannot access OVN Southbound database!"
 fi
 
+# CRITICAL (2025-12-20): Verify Neutron-OVN sync and repair if needed
+# After OVN crash/restart, OVN NB database may be empty while Neutron has networks
+# This causes VM creation to fail with "Cannot find Logical_Switch" errors
+echo "  Verifying Neutron-OVN database sync..."
+source ~/admin-openrc
+
+# Count networks in Neutron
+NEUTRON_NETS=$(/usr/bin/openstack network list -f value -c ID 2>/dev/null | wc -l || echo "0")
+
+# Count logical switches in OVN (each Neutron network = one logical switch)
+OVN_SWITCHES=$(ovsdb-client dump unix:/var/run/ovn/ovnnb_db.sock Logical_Switch 2>/dev/null | grep -c "neutron-" || echo "0")
+
+echo "    Neutron networks: ${NEUTRON_NETS}"
+echo "    OVN logical switches: ${OVN_SWITCHES}"
+
+if [ "$NEUTRON_NETS" -gt 0 ] && [ "$OVN_SWITCHES" -eq 0 ]; then
+    echo "  ⚠ Neutron-OVN desync detected! Running repair sync..."
+    sudo neutron-ovn-db-sync-util --config-file /etc/neutron/neutron.conf \
+        --config-file /etc/neutron/plugins/ml2/ml2_conf.ini \
+        --ovn-neutron_sync_mode repair
+    echo "  ✓ Neutron-OVN sync repair completed"
+
+    # Verify sync worked
+    OVN_SWITCHES=$(ovsdb-client dump unix:/var/run/ovn/ovnnb_db.sock Logical_Switch 2>/dev/null | grep -c "neutron-" || echo "0")
+    echo "    OVN logical switches after sync: ${OVN_SWITCHES}"
+elif [ "$NEUTRON_NETS" -gt 0 ] && [ "$OVN_SWITCHES" -lt "$NEUTRON_NETS" ]; then
+    echo "  ⚠ Partial desync detected (${OVN_SWITCHES}/${NEUTRON_NETS}). Running repair sync..."
+    sudo neutron-ovn-db-sync-util --config-file /etc/neutron/neutron.conf \
+        --config-file /etc/neutron/plugins/ml2/ml2_conf.ini \
+        --ovn-neutron_sync_mode repair
+    echo "  ✓ Neutron-OVN sync repair completed"
+else
+    echo "  ✓ Neutron-OVN databases in sync"
+fi
+
 # Check chassis registration
 CHASSIS_COUNT=$(sudo ovn-sbctl show 2>/dev/null | /usr/bin/grep -c "Chassis" || echo "0")
 echo "  OVN Chassis count: ${CHASSIS_COUNT}"
