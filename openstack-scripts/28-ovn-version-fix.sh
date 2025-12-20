@@ -1,33 +1,39 @@
 #!/bin/bash
 #===============================================================================
-# 28-ovn-version-fix.sh - Fix OVN Version Compatibility for OpenStack Caracal
+# 28-ovn-version-fix.sh - Fix OVN for OpenStack on Debian Trixie
 #===============================================================================
 #
 # PROBLEM DIAGNOSIS:
 # ==================
-# Your OVN controller is running but NOT installing OpenFlow rules into OVS.
-# Root cause: Version incompatibility between OVN 25.03.0 and Neutron Caracal
+# OVN controller is running but NOT installing OpenFlow rules into OVS.
+# Possible causes:
+#   - Corrupted OVN databases
+#   - Stale chassis registrations
+#   - Version mismatch (OVN 25.03.0 is newer than what Caracal was tested with)
 #
 # Your versions:
 #   - Neutron: 26.0.0-9 (Caracal 2024.1)
-#   - OVN: 25.03.0-1 (March 2025 - TOO NEW!)
+#   - OVN: 25.03.0-1 (March 2025)
 #   - OVS: 3.5.0-1+b1
-#
-# Required for Caracal (per OpenStack docs):
-#   - OVN: v21.06.0 to v24.03.0 (branch-24.03)
-#   - OVS: 2.16.x to 3.3.x
 #
 # Evidence of the problem:
 #   1. Chassis.nb_cfg = 0 (controller not processing)
 #   2. ZERO flows in br-int (ovs-ofctl dump-flows br-int | wc -l = 0)
 #   3. Port bindings show: up: false, chassis: []
-#   4. 3.5GB log file (controller in loop or error state)
+#   4. Large log file (controller in loop or error state)
 #
 # SOLUTIONS:
 # ==========
-# Option A: Downgrade OVN to compatible version from Debian Bookworm
-# Option B: Nuclear reset with database recreation
-# Option C: Try to force compatibility (less reliable)
+# Option A: Nuclear reset with database recreation (RECOMMENDED)
+# Option B: Force compatibility reset
+#
+# NOTE: Downgrade to Bookworm packages is NOT recommended on Trixie
+#       due to libc/library incompatibility (libc 2.41 vs 2.36)
+#
+# CRITICAL: Single-NIC Network Protection
+# ========================================
+# This script protects SSH connectivity throughout by maintaining
+# NORMAL flow rules on br-provider (management network).
 #
 #===============================================================================
 
@@ -59,8 +65,48 @@ load_credentials() {
     if [[ -f /home/ramanuj/admin-openrc ]]; then
         source /home/ramanuj/admin-openrc
         log_info "Loaded admin credentials"
+    elif [[ -f ~/admin-openrc ]]; then
+        source ~/admin-openrc
+        log_info "Loaded admin credentials from ~/admin-openrc"
     else
         log_warn "No admin-openrc found"
+    fi
+}
+
+#===============================================================================
+# CRITICAL: Single-NIC Network Protection Functions
+#===============================================================================
+# These functions ensure SSH/management connectivity is NEVER lost.
+# OVN sets fail_mode=secure on bridges which drops ALL traffic.
+
+PROVIDER_BRIDGE="${PROVIDER_BRIDGE:-br-provider}"
+
+ensure_provider_bridge_connectivity() {
+    # Remove fail_mode=secure if set
+    ovs-vsctl remove bridge ${PROVIDER_BRIDGE} fail_mode secure 2>/dev/null || true
+    # Add NORMAL flow rule to allow all traffic
+    ovs-ofctl add-flow ${PROVIDER_BRIDGE} "priority=0,actions=NORMAL" 2>/dev/null || true
+}
+
+verify_network_connectivity() {
+    local gateway=$(ip route | grep "^default" | awk '{print $3}' | head -1)
+    if [[ -n "$gateway" ]]; then
+        ping -c 1 -W 2 "$gateway" &>/dev/null && return 0
+    fi
+    ping -c 1 -W 2 192.168.2.9 &>/dev/null && return 0
+    return 1
+}
+
+recover_network_if_needed() {
+    ensure_provider_bridge_connectivity
+    if ! verify_network_connectivity; then
+        log_warn "Network disrupted - recovering..."
+        ip link set ${PROVIDER_BRIDGE} up 2>/dev/null || true
+        local gateway=$(ip route | grep "^default" | awk '{print $3}' | head -1)
+        if [[ -n "$gateway" ]] && ! ip route | grep -q "^default"; then
+            ip route add default via "$gateway" dev ${PROVIDER_BRIDGE} 2>/dev/null || true
+        fi
+        sleep 2
     fi
 }
 
@@ -238,122 +284,203 @@ EOF
 
 nuclear_reset() {
     print_header "Nuclear OVN Reset with Database Recreation"
-    
+
     log_warn "This will COMPLETELY reset OVN including databases!"
     log_warn "All OVN configuration will be lost and must be recreated by Neutron"
     echo ""
-    
+    echo -e "${YELLOW}Network connectivity will be protected throughout (single-NIC safe)${NC}"
+    echo ""
+
     read -p "Continue with nuclear reset? (y/N): " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { log_info "Aborted"; return 1; }
-    
-    # Protect network connectivity first
-    log_step "[1/10] Protecting network connectivity..."
-    ovs-ofctl add-flow br-provider "priority=0,actions=NORMAL" 2>/dev/null || true
-    
+
+    # PROTECT NETWORK FIRST
+    log_step "[1/12] Protecting network connectivity..."
+    ensure_provider_bridge_connectivity
+    if verify_network_connectivity; then
+        log_info "Network connectivity verified"
+    else
+        log_warn "Network check failed but proceeding..."
+    fi
+
     # Stop all services
-    log_step "[2/10] Stopping all services..."
+    log_step "[2/12] Stopping all services..."
     systemctl stop neutron-ovn-metadata-agent 2>/dev/null || true
+    ensure_provider_bridge_connectivity
     systemctl stop neutron-api 2>/dev/null || true
+    ensure_provider_bridge_connectivity
     systemctl stop neutron-rpc-server 2>/dev/null || true
+    ensure_provider_bridge_connectivity
     systemctl stop ovn-controller 2>/dev/null || true
+    ensure_provider_bridge_connectivity
     systemctl stop ovn-host 2>/dev/null || true
+    ensure_provider_bridge_connectivity
     systemctl stop ovn-central 2>/dev/null || true
-    
+    ensure_provider_bridge_connectivity
+
     # Kill any remaining processes
     pkill -9 ovn-controller 2>/dev/null || true
     pkill -9 ovn-northd 2>/dev/null || true
     pkill -9 ovsdb-server 2>/dev/null || true
     sleep 2
-    
+    ensure_provider_bridge_connectivity
+    recover_network_if_needed
+
     # Backup databases
-    log_step "[3/10] Backing up OVN databases..."
+    log_step "[3/12] Backing up OVN databases..."
     local backup_dir="/var/lib/ovn/backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$backup_dir"
     cp /var/lib/ovn/*.db "$backup_dir/" 2>/dev/null || true
     log_info "Backup saved to: $backup_dir"
-    
+
     # Remove OVN databases
-    log_step "[4/10] Removing OVN databases..."
+    log_step "[4/12] Removing OVN databases..."
     rm -f /var/lib/ovn/ovnnb_db.db
     rm -f /var/lib/ovn/ovnsb_db.db
     rm -f /var/lib/ovn/.ovnnb_db.db.~lock~
     rm -f /var/lib/ovn/.ovnsb_db.db.~lock~
-    
+
     # Clear OVN run files
-    log_step "[5/10] Clearing OVN runtime files..."
+    log_step "[5/12] Clearing OVN runtime files..."
     rm -f /var/run/ovn/*.sock
     rm -f /var/run/ovn/*.ctl
     rm -f /var/run/ovn/*.pid
-    
+
     # Clear OVN state from OVS
-    log_step "[6/10] Clearing OVN state from OVS..."
+    log_step "[6/12] Clearing OVN state from OVS..."
+    ensure_provider_bridge_connectivity
     ovs-vsctl --no-wait remove open_vswitch . external-ids ovn-encap-type 2>/dev/null || true
     ovs-vsctl --no-wait remove open_vswitch . external-ids ovn-encap-ip 2>/dev/null || true
     ovs-vsctl --no-wait remove open_vswitch . external-ids ovn-remote 2>/dev/null || true
     ovs-vsctl --no-wait remove open_vswitch . external-ids ovn-bridge 2>/dev/null || true
     ovs-vsctl --no-wait remove open_vswitch . external-ids ovn-cms-options 2>/dev/null || true
-    
-    # Reset br-int
-    log_step "[7/10] Resetting br-int flow tables..."
+    ensure_provider_bridge_connectivity
+
+    # Reset br-int (NOT br-provider!)
+    log_step "[7/12] Resetting br-int flow tables..."
     ovs-ofctl del-flows br-int 2>/dev/null || true
-    
+    ensure_provider_bridge_connectivity
+
     # Truncate huge log file
-    log_step "[8/10] Truncating OVN controller log..."
-    if [[ -f /var/log/ovn/ovn-controller.log ]]; then
-        local log_size=$(stat -f%z /var/log/ovn/ovn-controller.log 2>/dev/null || stat -c%s /var/log/ovn/ovn-controller.log)
-        if [[ $log_size -gt 100000000 ]]; then
-            log_info "Log file is $(($log_size / 1024 / 1024))MB, truncating..."
-            > /var/log/ovn/ovn-controller.log
+    log_step "[8/12] Truncating OVN logs..."
+    for logfile in /var/log/ovn/*.log; do
+        if [[ -f "$logfile" ]]; then
+            local log_size=$(stat -c%s "$logfile" 2>/dev/null || echo "0")
+            if [[ $log_size -gt 100000000 ]]; then
+                log_info "$(basename $logfile) is $(($log_size / 1024 / 1024))MB, truncating..."
+                > "$logfile"
+            fi
         fi
-    fi
-    
+    done
+
     # Start OVN Central and initialize databases
-    log_step "[9/10] Starting OVN Central and initializing databases..."
+    log_step "[9/12] Starting OVN Central..."
     systemctl start ovn-central
     sleep 3
-    
+    ensure_provider_bridge_connectivity
+
+    # Wait for databases to be ready
+    local max_wait=30
+    local wait_count=0
+    while [[ $wait_count -lt $max_wait ]]; do
+        ensure_provider_bridge_connectivity
+        if ovn-nbctl --no-leader-only show &>/dev/null && ovn-sbctl --no-leader-only show &>/dev/null; then
+            break
+        fi
+        wait_count=$((wait_count + 3))
+        echo "  Waiting for OVN databases... (${wait_count}s/${max_wait}s)"
+        sleep 3
+    done
+
     # Verify databases were created
     if [[ ! -f /var/lib/ovn/ovnnb_db.db ]] || [[ ! -f /var/lib/ovn/ovnsb_db.db ]]; then
         log_error "OVN databases not created!"
+        ensure_provider_bridge_connectivity
         return 1
     fi
     log_info "OVN databases recreated"
-    
+
     # Set socket permissions
-    chmod 666 /var/run/ovn/ovnnb_db.sock 2>/dev/null || true
-    chmod 666 /var/run/ovn/ovnsb_db.sock 2>/dev/null || true
-    
+    chmod 777 /var/run/ovn/ovnnb_db.sock 2>/dev/null || true
+    chmod 777 /var/run/ovn/ovnsb_db.sock 2>/dev/null || true
+    log_info "Socket permissions set"
+
     # Configure OVS for OVN
-    log_step "[10/10] Configuring OVS for OVN..."
+    log_step "[10/12] Configuring OVS for OVN..."
     local controller_ip="${CONTROLLER_IP:-192.168.2.9}"
     local system_id="$(hostname)"
-    
+
     ovs-vsctl set open . external-ids:ovn-remote="unix:/var/run/ovn/ovnsb_db.sock"
     ovs-vsctl set open . external-ids:ovn-encap-type="geneve"
     ovs-vsctl set open . external-ids:ovn-encap-ip="$controller_ip"
     ovs-vsctl set open . external-ids:system-id="$system_id"
     ovs-vsctl set open . external-ids:ovn-bridge="br-int"
     ovs-vsctl set open . external-ids:ovn-bridge-mappings="physnet1:br-provider"
-    ovs-vsctl set open . external-ids:ovn-cms-options=""
-    
-    log_info "OVS configured with:"
-    ovs-vsctl get open . external-ids
-    
+    ovs-vsctl set open . external-ids:ovn-monitor-all="true"
+
+    ensure_provider_bridge_connectivity
+    log_info "OVS configured"
+
     # Start OVN host/controller
+    log_step "[11/12] Starting OVN Controller..."
     systemctl start ovn-host
-    sleep 3
-    
-    # Restart Neutron services to recreate OVN resources
-    log_step "Restarting Neutron services..."
+    sleep 2
+    ensure_provider_bridge_connectivity
+    sleep 2
+    ensure_provider_bridge_connectivity
+
+    # Wait for chassis registration
+    echo "  Waiting for chassis registration..."
+    max_wait=30
+    wait_count=0
+    while [[ $wait_count -lt $max_wait ]]; do
+        ensure_provider_bridge_connectivity
+        local chassis=$(ovn-sbctl --bare --columns=name list Chassis 2>/dev/null | head -1 || true)
+        if [[ -n "$chassis" ]]; then
+            log_info "Chassis registered: $chassis"
+            break
+        fi
+        wait_count=$((wait_count + 3))
+        echo "  Waiting... (${wait_count}s/${max_wait}s)"
+        sleep 3
+    done
+
+    # Restart Neutron services
+    log_step "[12/12] Restarting Neutron services..."
     systemctl restart neutron-rpc-server
+    sleep 2
+    ensure_provider_bridge_connectivity
     systemctl restart neutron-api
+    sleep 2
+    ensure_provider_bridge_connectivity
     systemctl restart neutron-ovn-metadata-agent
-    sleep 5
-    
-    print_header "Nuclear Reset Complete"
-    echo "Neutron will now recreate the OVN resources (networks, ports, etc.)"
+    sleep 3
+    ensure_provider_bridge_connectivity
+
+    recover_network_if_needed
+
+    # Quick status check
     echo ""
-    echo "Run './28-ovn-version-fix.sh verify' to check the status"
+    echo "=== Quick Status Check ==="
+    local br_int_flows=$(ovs-ofctl dump-flows br-int 2>/dev/null | wc -l)
+    local chassis_nb_cfg=$(ovn-sbctl list Chassis 2>/dev/null | grep "nb_cfg" | awk '{print $3}' | head -1 || echo "0")
+    local global_nb_cfg=$(ovn-sbctl get SB_Global . nb_cfg 2>/dev/null || echo "0")
+
+    echo "  br-int flows: $br_int_flows"
+    echo "  Chassis nb_cfg: $chassis_nb_cfg (global: $global_nb_cfg)"
+
+    print_header "Nuclear Reset Complete"
+
+    if [[ "$br_int_flows" -gt 0 ]]; then
+        echo -e "${GREEN}SUCCESS: OVN controller is installing flows!${NC}"
+    else
+        echo -e "${YELLOW}NOTE: No flows yet - this may take up to 60 seconds${NC}"
+        echo "Wait and then run: sudo ovs-ofctl dump-flows br-int | wc -l"
+    fi
+    echo ""
+    echo "Run './28-ovn-version-fix.sh verify' to check full status"
+
+    ensure_provider_bridge_connectivity
 }
 
 #===============================================================================
@@ -513,21 +640,23 @@ verify_ovn() {
 #===============================================================================
 
 usage() {
-    echo "Usage: $0 {diagnose|downgrade|nuclear|force|verify|help}"
+    echo "Usage: $0 {diagnose|nuclear|force|verify|help}"
     echo ""
     echo "Commands:"
     echo "  diagnose   - Diagnose OVN version and compatibility issues"
-    echo "  downgrade  - Downgrade OVN to Debian Bookworm compatible version"
-    echo "  nuclear    - Complete reset with database recreation"
+    echo "  nuclear    - Complete reset with database recreation (RECOMMENDED)"
     echo "  force      - Attempt to force compatibility (less reliable)"
     echo "  verify     - Verify OVN status after fix"
     echo "  help       - Show this help"
     echo ""
     echo "Recommended workflow:"
     echo "  1. Run '$0 diagnose' to confirm the issue"
-    echo "  2. Run '$0 downgrade' to get compatible OVN version"
-    echo "  3. Run '$0 nuclear' to reinitialize databases"
-    echo "  4. Run '$0 verify' to confirm fix"
+    echo "  2. Run '$0 nuclear' to reinitialize databases"
+    echo "  3. Run '$0 verify' to confirm fix"
+    echo "  4. Run './34-smoke-test.sh' to test VM creation"
+    echo ""
+    echo "NOTE: Downgrade to Bookworm packages is NOT recommended on Trixie"
+    echo "      due to libc/library incompatibility (libc 2.41 vs 2.36)"
 }
 
 main() {
