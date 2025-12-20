@@ -224,6 +224,24 @@ fi
 CHASSIS_COUNT=$(sudo ovn-sbctl show 2>/dev/null | /usr/bin/grep -c "Chassis" || echo "0")
 echo "  OVN Chassis count: ${CHASSIS_COUNT}"
 
+# LESSON LEARNED (2025-12-20): Verify chassis nb_cfg is updating
+# If Chassis.nb_cfg = 0 while SB_Global.nb_cfg > 0, the controller is stuck
+# This is the root cause of "Alive: XXX" (false) in Neutron
+echo "  Verifying OVN chassis nb_cfg progression..."
+SB_GLOBAL_NBCFG=$(ovsdb-client dump unix:/var/run/ovn/ovnsb_db.sock SB_Global 2>/dev/null | awk 'NR>2 {print $5}' | head -1 || echo "0")
+CHASSIS_NBCFG=$(ovsdb-client dump unix:/var/run/ovn/ovnsb_db.sock Chassis 2>/dev/null | awk 'NR>2 {print $7}' | head -1 || echo "0")
+echo "    SB_Global nb_cfg: ${SB_GLOBAL_NBCFG}"
+echo "    Chassis nb_cfg: ${CHASSIS_NBCFG}"
+
+if [ "$CHASSIS_NBCFG" = "0" ] && [ "$SB_GLOBAL_NBCFG" != "0" ]; then
+    echo "  ⚠ Chassis nb_cfg is 0 - controller may be stuck!"
+    echo "    Attempting OVN controller restart..."
+    sudo systemctl restart ovn-controller
+    sleep 5
+    CHASSIS_NBCFG=$(ovsdb-client dump unix:/var/run/ovn/ovnsb_db.sock Chassis 2>/dev/null | awk 'NR>2 {print $7}' | head -1 || echo "0")
+    echo "    New Chassis nb_cfg: ${CHASSIS_NBCFG}"
+fi
+
 # CRITICAL: Restart neutron-ovn-metadata-agent AFTER OVN is stable
 # This ensures the agent registers with fresh heartbeat to Neutron
 echo "  Restarting neutron-ovn-metadata-agent for fresh heartbeat registration..."

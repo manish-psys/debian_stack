@@ -175,10 +175,16 @@ fi
 OVN_INSTALL_OPTS=""
 
 # Install OVN central (controller node only) and host (all nodes)
-if command -v ovn-nbctl &>/dev/null; then
-    echo "  ✓ OVN already installed"
+# LESSON LEARNED (2025-12-20): Check for actual packages, not just ovn-nbctl command
+# ovn-nbctl comes from ovn-common which remains after purging ovn-central/ovn-host
+OVN_CENTRAL_INSTALLED=$(dpkg -l ovn-central 2>/dev/null | grep -c "^ii" || echo "0")
+OVN_HOST_INSTALLED=$(dpkg -l ovn-host 2>/dev/null | grep -c "^ii" || echo "0")
+
+if [ "$OVN_CENTRAL_INSTALLED" -eq 1 ] && [ "$OVN_HOST_INSTALLED" -eq 1 ]; then
+    echo "  ✓ OVN packages already installed"
     ovn-nbctl --version 2>/dev/null | head -1 | sed 's/^/    /' || true
 else
+    echo "  Installing OVN packages..."
     sudo apt-get install -y $OVN_INSTALL_OPTS ovn-central ovn-host
     echo "  ✓ OVN packages installed"
 fi
@@ -189,12 +195,32 @@ fi
 echo ""
 echo "[3/7] Configuring OVN..."
 
+# Ensure OVN database directory exists with proper permissions
+sudo mkdir -p /var/lib/ovn
+sudo mkdir -p /var/run/ovn
+sudo chmod 755 /var/lib/ovn /var/run/ovn
+
+# Initialize OVN databases if they don't exist
+# LESSON LEARNED (2025-12-20): Fresh OVN install needs database initialization
+# Without this, OVN services may fail to start or behave erratically
+if [ ! -f /var/lib/ovn/ovnnb_db.db ]; then
+    echo "  Initializing OVN Northbound database..."
+    sudo ovsdb-tool create /var/lib/ovn/ovnnb_db.db /usr/share/ovn/ovn-nb.ovsschema
+    echo "  ✓ OVN Northbound database initialized"
+fi
+
+if [ ! -f /var/lib/ovn/ovnsb_db.db ]; then
+    echo "  Initializing OVN Southbound database..."
+    sudo ovsdb-tool create /var/lib/ovn/ovnsb_db.db /usr/share/ovn/ovn-sb.ovsschema
+    echo "  ✓ OVN Southbound database initialized"
+fi
+
 # Start OVN central services
 sudo systemctl enable ovn-central
 sudo systemctl start ovn-central
 
 # Wait for OVN northbound DB to be ready
-MAX_RETRIES=10
+MAX_RETRIES=15
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     if sudo ovn-nbctl --no-leader-only show &>/dev/null; then
@@ -204,19 +230,51 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     echo "  Waiting for OVN northbound DB... (${RETRY_COUNT}/${MAX_RETRIES})"
     sleep 2
 done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+    echo "  ✗ ERROR: OVN northbound DB not responding!"
+    echo "  Checking OVN central status..."
+    sudo systemctl status ovn-central --no-pager -l || true
+    exit 1
+fi
 echo "  ✓ OVN central running"
 
 # Configure OVN to connect to local databases (for AIO setup)
+# Use hostname as system-id for consistent chassis naming
+SYSTEM_ID=$(hostname)
 sudo ovs-vsctl set open . external-ids:ovn-remote=unix:/var/run/ovn/ovnsb_db.sock
 sudo ovs-vsctl set open . external-ids:ovn-encap-type=geneve
 sudo ovs-vsctl set open . external-ids:ovn-encap-ip=${CONTROLLER_IP}
-sudo ovs-vsctl set open . external-ids:system-id=$(hostname)
-echo "  ✓ OVN external-ids configured"
+sudo ovs-vsctl set open . external-ids:system-id="${SYSTEM_ID}"
+
+# LESSON LEARNED (2025-12-20): Configure OVN controller tuning to prevent high CPU
+# ovn-monitor-all=true: Monitor all tables (needed for single node)
+# ovn-openflow-probe-interval: Reduce OpenFlow probe frequency
+sudo ovs-vsctl set open . external-ids:ovn-monitor-all=true
+sudo ovs-vsctl set open . external-ids:ovn-openflow-probe-interval=60
+
+echo "  ✓ OVN external-ids configured (system-id: ${SYSTEM_ID})"
 
 # Start OVN controller (host service)
 sudo systemctl enable ovn-host
 sudo systemctl start ovn-host
-echo "  ✓ OVN host service running"
+
+# Wait for OVN controller to register
+sleep 3
+if systemctl is-active --quiet ovn-controller; then
+    echo "  ✓ OVN host service running"
+else
+    echo "  ✗ WARNING: OVN controller may not be running properly"
+    sudo systemctl status ovn-controller --no-pager -l || true
+fi
+
+# Verify chassis registration
+CHASSIS_CHECK=$(sudo ovn-sbctl show 2>/dev/null | grep -c "Chassis" || echo "0")
+if [ "$CHASSIS_CHECK" -gt 0 ]; then
+    echo "  ✓ OVN chassis registered"
+else
+    echo "  ⚠ OVN chassis not yet registered (may take a moment)"
+fi
 
 # CRITICAL: Fix OVN socket permissions for Neutron access
 # OVN creates sockets with restrictive permissions (root:root 750)
