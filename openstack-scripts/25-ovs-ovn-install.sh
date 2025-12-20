@@ -177,15 +177,40 @@ OVN_INSTALL_OPTS=""
 # Install OVN central (controller node only) and host (all nodes)
 # LESSON LEARNED (2025-12-20): Check for actual packages, not just ovn-nbctl command
 # ovn-nbctl comes from ovn-common which remains after purging ovn-central/ovn-host
-OVN_CENTRAL_INSTALLED=$(dpkg -l ovn-central 2>/dev/null | grep -c "^ii" || echo "0")
-OVN_HOST_INSTALLED=$(dpkg -l ovn-host 2>/dev/null | grep -c "^ii" || echo "0")
+# Use dpkg-query which gives cleaner output for scripting
+OVN_CENTRAL_INSTALLED="no"
+OVN_HOST_INSTALLED="no"
+if dpkg-query -W -f='${Status}' ovn-central 2>/dev/null | grep -q "install ok installed"; then
+    OVN_CENTRAL_INSTALLED="yes"
+fi
+if dpkg-query -W -f='${Status}' ovn-host 2>/dev/null | grep -q "install ok installed"; then
+    OVN_HOST_INSTALLED="yes"
+fi
 
-if [ "$OVN_CENTRAL_INSTALLED" -eq 1 ] && [ "$OVN_HOST_INSTALLED" -eq 1 ]; then
+if [ "$OVN_CENTRAL_INSTALLED" = "yes" ] && [ "$OVN_HOST_INSTALLED" = "yes" ]; then
     echo "  ✓ OVN packages already installed"
     ovn-nbctl --version 2>/dev/null | head -1 | sed 's/^/    /' || true
 else
     echo "  Installing OVN packages..."
+    # CRITICAL: For single-NIC setups, we need to prevent package install from
+    # disrupting network. Save current network state and ensure quick recovery.
+    SAVED_IP="$CURRENT_IP"
+    SAVED_GW="$CURRENT_GW"
+
+    # Install packages
     sudo apt-get install -y $OVN_INSTALL_OPTS ovn-central ovn-host
+
+    # Immediately verify network connectivity after install
+    sleep 2
+    if ! ping -c 1 -W 2 ${SAVED_GW:-8.8.8.8} &>/dev/null; then
+        echo "  ⚠ Network disrupted, attempting recovery..."
+        # Ensure br-provider has IP
+        sudo ip addr add ${SAVED_IP} dev ${PROVIDER_BRIDGE} 2>/dev/null || true
+        sudo ip link set ${PROVIDER_BRIDGE} up 2>/dev/null || true
+        sudo ip route add default via ${SAVED_GW} dev ${PROVIDER_BRIDGE} 2>/dev/null || true
+        sleep 2
+    fi
+
     echo "  ✓ OVN packages installed"
 fi
 
@@ -215,9 +240,23 @@ if [ ! -f /var/lib/ovn/ovnsb_db.db ]; then
     echo "  ✓ OVN Southbound database initialized"
 fi
 
+# CRITICAL: Define network recovery function for single-NIC setups
+# This ensures we don't lose SSH connectivity
+recover_network() {
+    local MSG="$1"
+    if ! ping -c 1 -W 2 ${CURRENT_GW:-8.8.8.8} &>/dev/null; then
+        echo "  ⚠ $MSG - recovering network..."
+        sudo ip addr add ${CURRENT_IP} dev ${PROVIDER_BRIDGE} 2>/dev/null || true
+        sudo ip link set ${PROVIDER_BRIDGE} up 2>/dev/null || true
+        sudo ip route add default via ${CURRENT_GW} dev ${PROVIDER_BRIDGE} 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 # Start OVN central services
 sudo systemctl enable ovn-central
 sudo systemctl start ovn-central
+recover_network "After ovn-central start"
 
 # Wait for OVN northbound DB to be ready
 MAX_RETRIES=15
@@ -229,12 +268,14 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     RETRY_COUNT=$((RETRY_COUNT + 1))
     echo "  Waiting for OVN northbound DB... (${RETRY_COUNT}/${MAX_RETRIES})"
     sleep 2
+    recover_network "While waiting for OVN DB"
 done
 
 if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
     echo "  ✗ ERROR: OVN northbound DB not responding!"
     echo "  Checking OVN central status..."
     sudo systemctl status ovn-central --no-pager -l || true
+    recover_network "After OVN central failure"
     exit 1
 fi
 echo "  ✓ OVN central running"
@@ -258,9 +299,12 @@ echo "  ✓ OVN external-ids configured (system-id: ${SYSTEM_ID})"
 # Start OVN controller (host service)
 sudo systemctl enable ovn-host
 sudo systemctl start ovn-host
+recover_network "After ovn-host start"
 
 # Wait for OVN controller to register
 sleep 3
+recover_network "After waiting for OVN controller"
+
 if systemctl is-active --quiet ovn-controller; then
     echo "  ✓ OVN host service running"
 else
