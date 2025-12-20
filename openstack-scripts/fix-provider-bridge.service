@@ -6,13 +6,12 @@ After=openvswitch-switch.service ovn-controller.service ovn-host.service network
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/usr/local/bin/fix-provider-bridge.sh br-provider
-RemainAfterExit=yes
-
-# Retry on failure - OVN might not be fully ready
-Restart=on-failure
-RestartSec=5
+Type=simple
+# Run in a loop to continuously ensure connectivity
+# This counters OVN's periodic re-application of fail_mode=secure
+ExecStart=/usr/local/bin/fix-provider-bridge.sh br-provider --daemon
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
